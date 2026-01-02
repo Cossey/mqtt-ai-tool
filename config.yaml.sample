@@ -1,0 +1,109 @@
+mqtt:
+  server: your-mqtt-server
+  port: 1883
+  basetopic: mqttai
+  username: your-username
+  password: your-password
+  password_file: /run/secrets/mqtt_password  # optional, will be used if `password` is not set
+  client: mqtt-camera-monitor
+
+ai:
+  openai:
+    endpoint: https://api.openai.com/v1/chat/completions
+    token: your-api-token
+    token_file: /run/secrets/openai_token   # optional, will be used if `token` is not set
+    type: openai
+    model: "gpt-4-vision-preview"
+
+# Cameras: support simple mapping (name -> endpoint string) or expanded object with credentials
+cameras:
+  # Simple string form (legacy):
+  garage: rtsp://user:pass@192.168.1.52:554/stream1
+
+  # Expanded form with separate credentials (preferred when using Docker secrets):
+  gate:
+    url: rtsp://192.168.1.50:554/stream1
+    username: user
+    password: pass
+    password_file: /run/secrets/gate_cam_password
+
+  # Another simple example
+  driveway: rtsp://user:pass@192.168.1.53:554/stream1
+
+# Prompts are decoupled from cameras. Each prompt can reference an AI backend via 'ai' and optionally override the model.
+prompts:
+  gate_prompt:
+    ai: openai
+    prompt: |
+      You are given a photo from a gate surveillance camera. The gate is located at the top of the image. There are usually two bins at the bottom of the image: a yellow bin (larger, with a yellow lid) and a red bin (smaller, with a red lid). While these bins are most often arranged with the yellow bin on the right and the red bin on the left, do not assume this unless visibility is poor and you cannot distinguish the bin lid colors.
+
+      Tasks:
+      1. Check if the gate at the top of the image is open. If open, set "GateOpen" to "Yes", otherwise to "No".
+      2. Check if the yellow bin (larger bin with a yellow lid) is present at the bottom of the image. If bin lid color is not visible (e.g., night vision), infer its presence by the rightmost bin's position. If only one bin is present and is in the rightmost position, assume it's the yellow bin. If a gap is visible between the right bin and the crate on the left, infer if the left (red) bin is missing.
+      3. Check if the red bin (smaller, red lid) is present at the bottom of the image. If bin lid color is not visible (e.g., night vision), infer its presence by the leftmost bin's position (next to the crate). If only one bin is present and a gap exists next to the crate, infer the red bin is missing.
+      4. If visibility is poor due to night vision, weather, or camera quality, and you cannot be certain of a bin or the gate, set the value to "Unknown" instead of "Yes" or "No". Also, add a "Visibility" field with values "Good", "Poor", or "Unknown" to indicate how clear the image is.
+    output:
+      GateOpen:
+        type: string
+        description: "Is the gate open?"
+        enum: ["Yes", "No", "Unknown"]
+      YellowBinPresent:
+        type: string
+        description: "Is the Yellow Bin present"
+        enum: ["Yes", "No", "Unknown"]
+      RedBinPresent:
+        type: string
+        description: "Is the Red Bin present"
+        enum: ["Yes", "No", "Unknown"]
+      Visibility:
+        type: string
+        description: "What is the visibility condition"
+        enum: ["Good", "Poor", "Unknown"]
+
+  garage_prompt:
+    ai: openai
+    prompt: "Describe what you see in this garage camera image. Is the garage door open or closed?"
+
+  driveway_motion:
+    ai: openai
+    prompt: |
+      You are analyzing sequential images from a driveway security camera to detect movement and activity patterns.
+      Look for vehicles, people, or other objects moving through the scene across the image sequence.
+
+      Tasks:
+      1. Analyze movement patterns between the sequential images
+      2. Identify if any vehicles entered or left the driveway
+      3. Detect if any people are present and their movement direction
+      4. Note any changes in parked vehicles or objects
+      5. Assess overall activity level in the driveway area
+    output:
+      VehicleMovement:
+        type: string
+        description: "Was vehicle movement detected across the sequence?"
+        enum: ["Entering", "Leaving", "Parked", "None", "Unknown"]
+      PeopleDetected:
+        type: string
+        description: "Were people detected in the sequence?"
+        enum: ["Yes", "No", "Unknown"]
+      MovementDirection:
+        type: string
+        description: "What direction was the primary movement?"
+        enum: ["Toward House", "Toward Street", "Across Driveway", "Stationary", "None", "Unknown"]
+      ActivityLevel:
+        type: string
+        description: "How much activity was detected?"
+        enum: ["High", "Medium", "Low", "None", "Unknown"]
+      ParkedVehicles:
+        type: string
+        description: "How many vehicles appear to be parked?"
+        enum: ["None", "One", "Two", "Three or More", "Unknown"]
+
+# Database connection configurations (currently only MariaDB is supported)
+databases:
+  main:
+    type: mariadb
+    server: db.local
+    port: 3306
+    username: dbuser
+    password_file: /run/secrets/db_password
+    database: exampledb

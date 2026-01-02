@@ -1,0 +1,36 @@
+name: Docker Build Test
+
+on:
+  push:
+    branches: [ "main", "actions" ]
+  pull_request:
+    branches: [ "main", "actions" ]
+
+jobs:
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker image (test)
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: mqtt-ai-tool:test-${{ github.sha }}
+          # Optional: enable platforms if you want to build multi-arch images
+          # platforms: linux/amd64,linux/arm64
+
+      - name: Verify image exists locally
+        run: |
+          docker image inspect mqtt-ai-tool:test-${{ github.sha }}
