@@ -27,6 +27,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: false
+          load: true
           tags: mqtt-ai-tool:test-${{ github.sha }}
           # Optional: enable platforms if you want to build multi-arch images
           # platforms: linux/amd64,linux/arm64
