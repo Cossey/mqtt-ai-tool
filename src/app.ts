@@ -106,36 +106,67 @@ async function processNextInput() {
             return;
         }
 
-        // If template is provided, resolve it. If template not found and no inline text, skip processing
-        let template: any = undefined;
+        // Resolve template(s): support single name or an array of names to chain
+        let templateText: string | undefined = undefined;
+        let templateModel: string | undefined = undefined;
+        let templateResponseFormat: any = undefined;
+
         if (payload.prompt && payload.prompt.template) {
-            const templateName = payload.prompt.template;
-            template = config.prompts?.[templateName];
-            if (!template && !payload.prompt.text) {
-                logger.warn(`Unknown prompt template: ${templateName} and no prompt.text provided - skipping`);
-                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, error: `Unknown prompt template: ${templateName}` }), false);
-                if (primaryCamera) statusService.recordError(primaryCamera, `Unknown prompt template: ${templateName}`);
+            const names = Array.isArray(payload.prompt.template) ? payload.prompt.template : [payload.prompt.template];
+
+            // Map names to prompt config entries (may be missing)
+            const configs = names.map((n: string) => ({ name: n, cfg: config.prompts?.[n] || null }));
+
+            // If none exist and there is no inline prompt.text, skip
+            const anyFound = configs.some((c: any) => c.cfg !== null);
+            if (!anyFound && !payload.prompt.text) {
+                logger.warn(`None of the specified templates found: ${JSON.stringify(names)} and no prompt.text provided - skipping`);
+                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, error: `Unknown prompt template(s): ${JSON.stringify(names)}` }), false);
+                if (primaryCamera) statusService.recordError(primaryCamera, `Unknown prompt template(s): ${JSON.stringify(names)}`);
                 processing = false;
                 publishQueueCount();
                 setImmediate(() => processNextInput());
                 return;
             }
+
+            // Compose templates from right-to-left. Missing templates use empty string but are warned.
+            let current = '';
+            for (let i = configs.length - 1; i >= 0; i--) {
+                const entry = configs[i];
+                if (!entry.cfg) {
+                    logger.warn(`Template '${entry.name}' not found, inserting empty string`);
+                    // If nothing currently, keep current as is
+                    continue;
+                }
+                const tText = entry.cfg.prompt || '';
+                // Capture the first template-defined model/response_format from left to right
+                if (!templateModel && entry.cfg.model) templateModel = entry.cfg.model;
+                if (!templateResponseFormat && entry.cfg.response_format) templateResponseFormat = entry.cfg.response_format;
+
+                if (!current) {
+                    current = tText;
+                } else {
+                    if (/{{\s*template\s*}}/.test(tText)) {
+                        current = tText.replace(/{{\s*template\s*}}/g, current);
+                    } else {
+                        current = `${tText}\n\n${current}`;
+                    }
+                }
+            }
+
+            if (current) templateText = current;
+            // If templateResponseFormat provided, use that as default (may be overridden by inline output)
+            if (templateResponseFormat) responseFormat = templateResponseFormat;
         }
 
-        // Start with template prompt if available
-        if (template && template.prompt) {
-            promptText = template.prompt;
-            responseFormat = template.response_format;
-        }
-
-        // If inline text is provided, either inject into a {{prompt}} placeholder or append
+        // If inline text is provided, either inject into a {{prompt}} placeholder in the composed template or append
         if (payload.prompt && payload.prompt.text) {
             const inlineText = payload.prompt.text;
-            if (template && template.prompt && /{{\s*prompt\s*}}/.test(template.prompt)) {
-                promptText = template.prompt.replace(/{{\s*prompt\s*}}/g, inlineText);
-            } else if (template && template.prompt) {
-                // No placeholder found: append inline text to template
-                promptText = `${promptText}\n\n${inlineText}`;
+
+            if (templateText && /{{\s*prompt\s*}}/.test(templateText)) {
+                promptText = templateText.replace(/{{\s*prompt\s*}}/g, inlineText);
+            } else if (templateText) {
+                promptText = `${templateText}\n\n${inlineText}`;
             } else {
                 // No template: use inline text directly
                 promptText = inlineText;
@@ -157,6 +188,15 @@ async function processNextInput() {
                     },
                 };
             }
+        } else if (templateText) {
+            // No inline text but we have a template chain
+            promptText = templateText;
+        }
+
+        // If model override exists, prioritize inline override, then first template model, then backend default
+        if (!payload.prompt?.model && templateModel) {
+            // templateModel is set from first (leftmost) template that specified a model
+            // We do not assign here; usedModel computed later
         }
 
         // Collect files from payload.files and loader entries
@@ -338,8 +378,8 @@ async function processNextInput() {
         // Before sending to AI, update status if we have a camera
         if (primaryCamera) statusService.updateStatus(primaryCamera, 'Processing with AI');
 
-        // Determine which model will be used (inline override -> template override -> backend default)
-        const usedModel = (payload.prompt && payload.prompt.model) || (template && template.model) || aiBackend.model;
+        // Determine which model will be used (inline override -> template chain override -> backend default)
+        const usedModel = (payload.prompt && payload.prompt.model) || templateModel || aiBackend.model;
 
         // Send to AI service: delegate to AiService to handle different backends
         const aiStart = Date.now();
@@ -424,22 +464,24 @@ function extractStructuredFromAiResponse(resp: any, responseFormat?: any): any {
     try {
         if (!resp) return null;
 
-        // If response contains a top-level 'output' object (OpenAI structured outputs), use it
-        if (resp.output && typeof resp.output === 'object') {
+        // 1) Preferred: top-level 'output' object (OpenAI structured outputs)
+        if (resp.output && typeof resp.output === 'object' && Object.keys(resp.output).length > 0) {
             return resp.output;
         }
 
-        // Common alternative: choices[0].message.content may contain JSON string
+        // 2) Some APIs return data.output or result.output
+        if (resp.data && resp.data.output && typeof resp.data.output === 'object') return resp.data.output;
+        if (resp.result && resp.result.output && typeof resp.result.output === 'object') return resp.result.output;
+
+        // 3) Check choices[0].message.content for structured output
         if (resp.choices && resp.choices.length > 0 && resp.choices[0].message) {
             const content = resp.choices[0].message.content;
-            if (typeof content === 'object') {
-                // If the model returned a structured object directly
-                return content;
+            if (typeof content === 'object' && Object.keys(content).length > 0) {
+                return content; // structured object directly returned
             }
             if (typeof content === 'string') {
-                // Try to extract JSON from the string
                 const trimmed = content.trim();
-                // If it looks like a JSON object or array, try to parse
+                // Exact JSON object/array
                 if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
                     try {
                         return JSON.parse(trimmed);
@@ -448,25 +490,19 @@ function extractStructuredFromAiResponse(resp: any, responseFormat?: any): any {
                     }
                 }
 
-                // If the response_format was json_schema, some providers may wrap structured data in a different field
-                // Try to find the first JSON-looking substring in the content
+                // Try to extract the first JSON object-looking substring
                 const firstJsonMatch = trimmed.match(/\{[\s\S]*\}/);
                 if (firstJsonMatch) {
                     try {
                         return JSON.parse(firstJsonMatch[0]);
                     } catch (e) {
-                        // ignore
+                        // ignore parse errors
                     }
                 }
             }
         }
 
-        // As a last resort, attempt to locate any object-looking property on the response
-        const keys = Object.keys(resp);
-        for (const k of keys) {
-            if (typeof resp[k] === 'object') return resp[k];
-        }
-
+        // If responseFormat indicates json_schema but we couldn't extract, return null rather than raw response
         return null;
     } catch (e) {
         logger.warn(`Failed to extract structured output from AI response: ${e}`);

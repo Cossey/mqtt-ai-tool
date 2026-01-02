@@ -173,6 +173,7 @@ Note: If an INPUT contains an optional `topic` property, the response will be pu
 - Requests must include a `prompt` object that contains either `prompt.template` **or** `prompt.text` (or both). Requests missing both will be ignored and an error message will be published to `<basetopic>/OUTPUT` with the same `tag`.
 - If `prompt.template` is present but not found in `config.prompts` and no `prompt.text` is provided, the request will be ignored and an error published to `<basetopic>/OUTPUT`.
 - When both `prompt.template` and `prompt.text` are provided, `prompt.text` will be injected into a `{{prompt}}` placeholder in the template if present; otherwise it will be appended to the template separated by a blank line.
+- `prompt.template` may also be an array of template names (e.g., `"template": ["t1","t2"]`). Templates are concatenated in order: the later templates are inserted into earlier ones using a `{{template}}` placeholder if present; otherwise they are appended. Templates are processed left-to-right so `t1` is the outermost template. Placeholders `{{template}}` and `{{prompt}}` may appear multiple times and will be replaced at every occurrence.
 
 ### Camera Status Values
 
