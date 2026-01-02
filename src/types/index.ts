@@ -104,7 +104,7 @@ export interface CameraStats {
 }
 
 export interface CameraStatusManager {
-    updateStatus(cameraName: string, status: string): void;
+    updateStatus(cameraName: string | undefined, status: string): void;
     updateStats(cameraName: string, stats: Partial<CameraStats>): void;
     getStats(cameraName: string): CameraStats;
     getStatus(cameraName: string): string;

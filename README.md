@@ -8,16 +8,16 @@ The MQTT AI Tool is a TypeScript/Node.js application that listens for JSON `INPU
 
 ## Features
 
-- **Single INPUT topic**: Submit JSON requests to a single `<basetopic>/INPUT` topic; requests are queued and processed sequentially
-- **Multiple loaders**: Camera, URL, File, MQTT topic, and Database (MariaDB) loaders supported
-- **Flexible attachments**: Attach files, embed data inline, or attach CSV exports of query results
-- **RTSP Camera Support**: Capture high-quality images using FFmpeg when requested by a loader
-- **AI Backends**: Sends attached files and prompts to configurable AI backends (OpenAI-compatible by default)
-- **Real-time Stats**: Publish processing status and performance metrics to `<basetopic>/STATS` (includes `camera` when applicable)
-- **Queue visibility**: `<basetopic>/QUEUED` publishes the current queue size (retained)
-- **Graceful operation**: Automatic cleanup, LWT online/offline status, and graceful shutdown handling
-- **Docker-friendly**: Works well in containerized environments and supports secret-mounted password files for DB credentials
-- **Structured responses**: Optional JSON schema-based responses for consistent outputs
+- **Single INPUT topic**: Submit JSON requests to `<basetopic>/INPUT`; requests are queued and processed sequentially.
+- **Multiple loaders**: Camera, URL, File, MQTT topic, and Database (MariaDB) loaders are supported.
+- **Flexible attachments**: Attach files, embed data inline, or attach CSV exports of query results.
+- **RTSP Camera Support**: Capture high-quality images using FFmpeg when requested by a loader.
+- **AI Backends**: Send attached files and prompts to configurable AI backends (OpenAI-compatible by default).
+- **Real-time progress & metrics**: Live processing updates are published to `<basetopic>/PROGRESS`; performance and historical metrics go to `<basetopic>/STATS`.
+- **Queue visibility**: `<basetopic>/QUEUED` publishes the current queue size (retained).
+- **Graceful operation**: Automatic cleanup, LWT `ONLINE`/`OFFLINE` status on `<basetopic>/ONLINE`, and graceful shutdown handling.
+- **Docker-friendly**: Works well in containers and supports secret-mounted password files for credentials.
+- **Structured responses**: Optional JSON schema-based responses provide consistent outputs.
 
 ## How it Works
 
@@ -27,10 +27,10 @@ The application now uses a simplified global topic set under the base topic. Rep
 
 - **`<basetopic>/INPUT`** - Accepts a JSON object to request analysis (see format below)
 - **`<basetopic>/OUTPUT`** - Returns JSON objects with the AI result for each processed request
-- **`<basetopic>/STATS`** - Performance and status information (camera-specific fields included in payload)
+- **`<basetopic>/STATS`** - Performance and historical metrics. Use **`<basetopic>/PROGRESS`** for live status updates (camera-specific fields included in payload).
 - **`<basetopic>/QUEUED`** - Retained number indicating how many INPUT requests are queued
 
-## Databases configuration
+## Database configuration
 
 You can declare database connections (MariaDB only) in `config.yaml` under a `databases` section:
 
@@ -141,7 +141,7 @@ MQTT loader example in `INPUT` JSON:
     "ai": "openai",                       # optional, if missing the first configured AI backend will be used
     "prompt": {
         "template": "gate_prompt",        # optional - name of a prompt from config
-        "text": "Custom prompt text",     # optional - inline prompt text overrides template
+        "text": "Custom prompt text",     # optional - inline text; if template provided, text will be injected into a {{prompt}} placeholder if present or appended to the template
         "output": {                         # optional - inline output schema
             "FieldA": { "type": "string" }
         },
@@ -160,14 +160,23 @@ MQTT loader example in `INPUT` JSON:
 {
     "tag": "my-request-123",
     "time": 4.12,
+    "model": "gpt-4-vision-preview",
     "text": "(any return text from the AI)",
-    "json": { /* the raw AI response object */ }
+    "json": { /* the structured output object from the model (if available), otherwise null */ }
 }
 ```
 
+Note: If an INPUT contains an optional `topic` property, the response will be published to `<basetopic>/OUTPUT/<topic>` instead of the base `OUTPUT` topic. The `topic` value is validated (wildcards and control characters are disallowed) and may include `/` separators for subtopics. If invalid, the response will fall back to the base `<basetopic>/OUTPUT` topic and a warning will be logged/published.
+
+### Prompt rules
+
+- Requests must include a `prompt` object that contains either `prompt.template` **or** `prompt.text` (or both). Requests missing both will be ignored and an error message will be published to `<basetopic>/OUTPUT` with the same `tag`.
+- If `prompt.template` is present but not found in `config.prompts` and no `prompt.text` is provided, the request will be ignored and an error published to `<basetopic>/OUTPUT`.
+- When both `prompt.template` and `prompt.text` are provided, `prompt.text` will be injected into a `{{prompt}}` placeholder in the template if present; otherwise it will be appended to the template separated by a blank line.
+
 ### Camera Status Values
 
-The `/STATS` topic provides real-time updates during processing (each payload includes a `camera` field when applicable):
+The `/PROGRESS` topic provides real-time status updates during processing (each payload includes a `camera` field when applicable). The `/STATS` topic contains performance metrics and historical stats.
 
 - **`"Idle"`** - Ready to process INPUT requests
 - **`"Starting capture"`** - Beginning data capture process
@@ -204,16 +213,15 @@ The `/STATS` topic publishes a JSON object with performance metrics (payload inc
 
 ### Workflow
 
-1. **Initialization**: Application connects to MQTT broker and initializes camera topics
-2. **Trigger**: Publish a JSON request to `<basetopic>/INPUT` to start analysis (see INPUT format)
-3. **Status Updates**: Real-time status published to `<basetopic>/STATS` (payload includes `camera` field)
-4. **Image Capture**: Application captures one or multiple high-quality images from RTSP camera
-5. **Image Publishing**: Captured images are attached to AI requests or stored temporarily; the resulting AI response and any structured output are published to `<basetopic>/OUTPUT`
-6. **AI Processing**: All captured images are sent to AI endpoint with configured prompt
-7. **Result Publishing**: AI result object is published to `<basetopic>/OUTPUT`
-8. **Statistics Update**: Performance metrics published to `<basetopic>/STATS` (payload includes `camera` field)
-9. **Queued / Reset**: There is no per-camera trigger to reset; instead the queue length is reflected on `<basetopic>/QUEUED` and completed requests are returned via `<basetopic>/OUTPUT`
-10. **Cleanup**: All temporary image files are automatically deleted
+1. **Initialization**: Application connects to MQTT broker and initializes base channels and per-camera `PROGRESS` entries.
+2. **Trigger**: Publish a JSON request to `<basetopic>/INPUT` to start analysis (see INPUT format). Requests without a valid prompt are skipped and an error published to `<basetopic>/OUTPUT`.
+3. **Progress**: Live status updates are published to `<basetopic>/PROGRESS` (payloads include `camera` when applicable). Use `<basetopic>/STATS` for performance and historical metrics.
+4. **Image Capture**: Application captures one or multiple high-quality images from RTSP camera (if requested by loaders).
+5. **AI Processing**: Captured files and loader data are sent to the configured AI backend together with the resolved prompt.
+6. **Result Publishing**: AI outputs (structured object if available) are published to `<basetopic>/OUTPUT`.
+7. **Statistics Update**: Performance metrics (times and last success/error) are published to `<basetopic>/STATS`.
+8. **Queued / Reset**: There is no per-camera reset; the queue length is reflected on `<basetopic>/QUEUED` and completed requests are returned via `<basetopic>/OUTPUT`.
+9. **Cleanup**: All temporary files are deleted automatically after processing.
 
 ### Multi-Image Capture
 
@@ -445,13 +453,20 @@ mosquitto_sub -h mqtt-server -t "mqttai/STATS" -v
 
 ### Performance Monitoring
 
-Use the `<basetopic>/STATS` topic to monitor performance and status (payloads include a `camera` field when applicable):
+Use the `<basetopic>/STATS` topic to monitor performance and historical metrics; subscribe to `<basetopic>/PROGRESS` for live status updates (payloads include a `camera` field when applicable):
 
 ```bash
-# Subscribe to STATS for all cameras (payloads include the `camera` field)
+# Subscribe to PROGRESS for live status updates and STATS for performance metrics
+mosquitto_sub -h mqtt-server -t "mqttai/PROGRESS" -v
 mosquitto_sub -h mqtt-server -t "mqttai/STATS" -v
 
-# Example output:
+# Example PROGRESS update:
+{
+  "camera": "garage",
+  "status": "Capturing"
+}
+
+# Example STATS update:
 {
   "camera": "garage",
   "stats": {
@@ -497,7 +512,7 @@ mosquitto_sub -h mqtt-server -t "mqttai/STATS" -v
 ### Camera Settings
 
 - `endpoint`: RTSP stream URL with credentials
-- `prompt`: Text prompt for AI analysis
+- `prompt`: Text prompt for AI analysis. If both `prompt.template` and `prompt.text` are provided, the `prompt.text` will be inserted into the template at a `{{prompt}}` placeholder if present; otherwise it will be appended to the template with a blank line separator.
 - `captures`: Number of sequential images (1-10+, default: 1)
 - `interval`: Milliseconds between captures (≥0, default: 1000)
 - `output`: Optional structured output schema
@@ -536,6 +551,3 @@ For issues and questions:
 - Monitor disk space and memory usage for multi-image scenarios
 - Open an issue on the project repository
 
-## AI Notice
-
-Vibe-coded in Claude Sonnet 4 and Raptor mini. No cap.

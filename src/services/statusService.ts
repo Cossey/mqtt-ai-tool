@@ -11,11 +11,15 @@ export class StatusService extends EventEmitter {
         logger.debug('Status Service initialized');
     }
 
-    public updateStatus(cameraName: string, status: string): void {
-        this.cameraStatus[cameraName] = status;
-        logger.debug(`Status updated for camera ${cameraName}: ${status}`);
+    public updateStatus(cameraName: string | undefined, status: string): void {
+        if (cameraName) {
+            this.cameraStatus[cameraName] = status;
+            logger.debug(`Status updated for camera ${cameraName}: ${status}`);
+        } else {
+            logger.debug(`Global status update: ${status}`);
+        }
 
-        // Emit event for MQTT publishing
+        // Emit event for MQTT publishing (cameraName may be undefined)
         this.emit('statusUpdate', cameraName, status);
     }
 
@@ -41,30 +45,38 @@ export class StatusService extends EventEmitter {
         return this.cameraStatus[cameraName] || 'Idle';
     }
 
-    public recordError(cameraName: string, error: string | Error): void {
+    public recordError(cameraName: string | undefined, error: string | Error): void {
         const errorMessage = error instanceof Error ? error.message : error;
         const now = new Date().toISOString();
 
-        this.updateStats(cameraName, {
-            lastErrorDate: now,
-            lastErrorType: errorMessage
-        });
+        if (cameraName) {
+            this.updateStats(cameraName, {
+                lastErrorDate: now,
+                lastErrorType: errorMessage
+            });
 
-        this.updateStatus(cameraName, 'Error');
-        logger.debug(`Error recorded for camera ${cameraName}: ${errorMessage}`);
+            this.updateStatus(cameraName, 'Error');
+            logger.debug(`Error recorded for camera ${cameraName}: ${errorMessage}`);
+        } else {
+            logger.debug(`Global error recorded: ${errorMessage}`);
+        }
     }
 
-    public recordSuccess(cameraName: string, aiProcessTime: number, totalProcessTime: number): void {
+    public recordSuccess(cameraName: string | undefined, aiProcessTime: number, totalProcessTime: number): void {
         const now = new Date().toISOString();
 
-        this.updateStats(cameraName, {
-            lastSuccessDate: now,
-            lastAiProcessTime: aiProcessTime,
-            lastTotalProcessTime: totalProcessTime
-        });
+        if (cameraName) {
+            this.updateStats(cameraName, {
+                lastSuccessDate: now,
+                lastAiProcessTime: aiProcessTime,
+                lastTotalProcessTime: totalProcessTime
+            });
 
-        this.updateStatus(cameraName, 'Complete');
-        logger.debug(`Success recorded for camera ${cameraName}: AI=${aiProcessTime}s, Total=${totalProcessTime}s`);
+            this.updateStatus(cameraName, 'Complete');
+            logger.debug(`Success recorded for camera ${cameraName}: AI=${aiProcessTime}s, Total=${totalProcessTime}s`);
+        } else {
+            logger.debug(`Global success recorded: AI=${aiProcessTime}s, Total=${totalProcessTime}s`);
+        }
     }
 
     public getAllCameraStats(): Record<string, CameraStats> {

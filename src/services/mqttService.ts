@@ -30,7 +30,7 @@ export class MqttService extends EventEmitter {
             logger.info(`Connecting to MQTT broker at ${this.config.server}:${this.config.port}`);
             logger.debug(`MQTT connection string: ${this.sanitizeMqttConfig()}`);
 
-            const onlineTopic = `${this.config.basetopic}/online`;
+            const onlineTopic = `${this.config.basetopic}/ONLINE`;
 
             this.client = connect(`mqtt://${this.config.server}:${this.config.port}`, {
                 username: this.config.username,
@@ -130,7 +130,7 @@ export class MqttService extends EventEmitter {
             return;
         }
 
-        if (targetTopic === 'online') {
+        if (targetTopic.toUpperCase() === 'ONLINE') {
             logger.debug(`Ignoring online status topic: "${topic}"`);
             return;
         }
@@ -240,10 +240,22 @@ export class MqttService extends EventEmitter {
         this.publish(topic, message, true); // Retained
     }
 
-    public publishStatus(cameraName: string, status: string) {
-        const topic = `${this.config.basetopic}/STATS`;
-        const message = JSON.stringify({ camera: cameraName, status });
+    /**
+     * Publish a short progress/status update. Uses the PROGRESS topic and retains the message.
+     * If cameraName is undefined or empty, the message will omit the camera field.
+     */
+    public publishProgress(cameraName: string | undefined, status: string) {
+        const topic = `${this.config.basetopic}/PROGRESS`;
+        const payloadObj: any = { status };
+        if (cameraName) payloadObj.camera = cameraName;
+        const message = JSON.stringify(payloadObj);
         this.publish(topic, message, true); // Retained
+    }
+
+    // Backwards compatibility wrapper (deprecated)
+    public publishStatus(cameraName: string | undefined, status: string) {
+        logger.warn('publishStatus is deprecated; use publishProgress instead');
+        this.publishProgress(cameraName, status);
     }
 
     public initializeChannels(cameras: Record<string, any>) {
@@ -253,13 +265,22 @@ export class MqttService extends EventEmitter {
         const inputTopic = `${this.config.basetopic}/INPUT`;
         const outputTopic = `${this.config.basetopic}/OUTPUT`;
         const statsTopic = `${this.config.basetopic}/STATS`;
+        const progressTopic = `${this.config.basetopic}/PROGRESS`;
         const queuedTopic = `${this.config.basetopic}/QUEUED`;
 
         // Initialize retained base topics
         this.publish(inputTopic, JSON.stringify({}), true);
         this.publish(outputTopic, JSON.stringify({}), true);
         this.publish(statsTopic, JSON.stringify({}), true);
+        this.publish(progressTopic, JSON.stringify({}), true);
         this.publish(queuedTopic, '0', true);
+
+        // Initialize per-camera progress entries (retain) so PROGRESS is populated from the start
+        if (cameras && Object.keys(cameras).length > 0) {
+            Object.keys(cameras).forEach(name => {
+                this.publish(progressTopic, JSON.stringify({ camera: name, status: 'Idle' }), true);
+            });
+        }
 
         logger.info('Base channel initialization complete');
     }
@@ -268,7 +289,7 @@ export class MqttService extends EventEmitter {
     public gracefulShutdown() {
         logger.info('Performing graceful MQTT shutdown...');
         if (this.client && this.client.connected) {
-            const onlineTopic = `${this.config.basetopic}/online`;
+            const onlineTopic = `${this.config.basetopic}/ONLINE`;
             // Publish offline status before disconnecting
             this.client.publish(onlineTopic, 'NO', { retain: true }, (err) => {
                 if (err) {
