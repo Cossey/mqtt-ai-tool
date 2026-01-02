@@ -309,7 +309,7 @@ Note: Capture counts and intervals are provided via the INPUT `loader` entries w
 
 ```bash
 docker run -d \
-  --name mqtt-camera-monitor \
+  --name mqtt-ai-tool \
   -v /path/to/your/config.yaml:/usr/src/app/config.yaml \
   kosdk/mqtt-camera-ai-monitor:latest
 ```
@@ -332,7 +332,7 @@ version: '3.8'
 services:
   mqtt-ai-tool:
     image: kosdk/mqtt-ai-tool:latest
-    container_name: mqtt-camera-monitor
+    container_name: mqtt-ai-tool
     environment:
       - CONFIG_FILE=/app/config/config.yaml
       - LOG_LEVEL=info

@@ -5,7 +5,7 @@ mqtt:
   username: your-username
   password: your-password
   password_file: /run/secrets/mqtt_password  # optional, will be used if `password` is not set
-  client: mqtt-camera-monitor
+  client: mqtt-ai-tool
 
 ai:
   openai:
