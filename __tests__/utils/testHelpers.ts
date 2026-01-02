@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs';
 
 export type ServiceOverrides = {
     mqtt?: Record<string, any>;
@@ -9,6 +10,17 @@ export type ServiceOverrides = {
 };
 
 export async function importAppWithMocks(overrides: ServiceOverrides = {}) {
+    // Ensure test config exists (copy sample if necessary) to avoid loadConfig calling process.exit during imports
+    try {
+        const samplePath = path.join(__dirname, '../../config.yaml.sample');
+        const destPath = path.join(__dirname, '../../config.yaml');
+        if (!fs.existsSync(destPath) && fs.existsSync(samplePath)) {
+            fs.copyFileSync(samplePath, destPath);
+        }
+    } catch (e) {
+        // ignore any fs errors here; we'll let loadConfig raise if truly missing
+    }
+
     // Reset module registry so mocks take effect
     jest.resetModules();
 
