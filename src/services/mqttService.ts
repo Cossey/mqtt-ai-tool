@@ -241,14 +241,12 @@ export class MqttService extends EventEmitter {
     }
 
     /**
-     * Publish a short progress/status update. Uses the PROGRESS topic and retains the message.
-     * If cameraName is undefined or empty, the message will omit the camera field.
+     * Publish a short progress/status update as plain text (no JSON). Uses the PROGRESS topic and retains the message.
+     * If cameraName is provided, the message will be: "<cameraName>: <status>" otherwise it's just the status text.
      */
     public publishProgress(cameraName: string | undefined, status: string) {
         const topic = `${this.config.basetopic}/PROGRESS`;
-        const payloadObj: any = { status };
-        if (cameraName) payloadObj.camera = cameraName;
-        const message = JSON.stringify(payloadObj);
+        const message = cameraName && cameraName.length > 0 ? `${cameraName}: ${status}` : status;
         this.publish(topic, message, true); // Retained
     }
 
@@ -272,13 +270,15 @@ export class MqttService extends EventEmitter {
         this.publish(inputTopic, JSON.stringify({}), true);
         this.publish(outputTopic, JSON.stringify({}), true);
         this.publish(statsTopic, JSON.stringify({}), true);
-        this.publish(progressTopic, JSON.stringify({}), true);
+        // PROGRESS is plain text; initialize with a generic Idle message
+        this.publish(progressTopic, 'Idle', true);
         this.publish(queuedTopic, '0', true);
 
-        // Initialize per-camera progress entries (retain) so PROGRESS is populated from the start
+        // Initialize per-camera progress entries (retain) so a meaningful PROGRESS message exists early
         if (cameras && Object.keys(cameras).length > 0) {
             Object.keys(cameras).forEach(name => {
-                this.publish(progressTopic, JSON.stringify({ camera: name, status: 'Idle' }), true);
+                // publish per-camera Idle messages (plain text: "<camera>: Idle")
+                this.publish(progressTopic, `${name}: Idle`, true);
             });
         }
 

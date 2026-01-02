@@ -107,9 +107,14 @@ describe('processPayload integration tests (mocked services)', () => {
 
         const res = await processPayload(payload);
 
-        // Ensure status updates happened (Starting capture, Capturing, Publishing response, Cleaning up)
+        // Ensure status updates happened with loader/capture counts and lifecycle events
         const statusCalls = (statusService.updateStatus as jest.Mock).mock.calls.map((c: any) => c[1]);
-        expect(statusCalls).toEqual(expect.arrayContaining(['Starting capture', 'Capturing', 'Publishing response', 'Cleaning up']));
+        expect(statusCalls.some((s: string) => s.includes('Processing loader'))).toBeTruthy();
+        expect(statusCalls.some((s: string) => s.includes('Capturing (1 of 1)'))).toBeTruthy();
+        expect(statusCalls.some((s: string) => s.includes('Publishing response'))).toBeTruthy();
+        expect(statusCalls.some((s: string) => s.includes('Cleaning up'))).toBeTruthy();
+        // recordSuccess should have been called after cleanup
+        expect(statusService.recordSuccess).toHaveBeenCalled();
 
         // Ensure the publish used a sanitized topic
         const publishCalls = (mqttService.publish as jest.Mock).mock.calls;
@@ -117,8 +122,9 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(outCall).toBeDefined();
         const topicUsed = outCall[0];
         expect(topicUsed).toContain('/OUTPUT/');
-        // sanitized sub-topic (after /OUTPUT/) should not contain '/' or ':'
+        // sub-topic (after /OUTPUT/) should NOT contain ':' but may contain '/'
         const sub = topicUsed.split('/OUTPUT/')[1];
-        expect(sub).not.toMatch(/[\/:]/);
+        expect(sub).not.toContain(':');
+        expect(sub).toContain('/');
     });
 });

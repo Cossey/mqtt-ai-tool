@@ -168,6 +168,21 @@ MQTT loader example in `INPUT` JSON:
 
 Note: If an INPUT contains an optional `topic` property, the response will be published to `<basetopic>/OUTPUT/<topic>` instead of the base `OUTPUT` topic. The `topic` value is validated (wildcards and control characters are disallowed) and may include `/` separators for subtopics. If invalid, the response will fall back to the base `<basetopic>/OUTPUT` topic and a warning will be logged/published.
 
+Examples of valid and invalid `topic` values:
+
+```text
+# Valid - simple subtopic preserved:
+topic = "BACKYARD/SECURITY"  -> publishes to <basetopic>/OUTPUT/BACKYARD/SECURITY
+
+# Valid - colons inside a segment are replaced with underscores:
+topic = "Back/yard:weird"    -> publishes to <basetopic>/OUTPUT/Back/yard_weird
+
+# Invalid - wildcards not allowed (falls back to base OUTPUT and warning published):
+topic = "Bad/+/Topic"        -> publishes to <basetopic>/OUTPUT (warning published)
+```
+
+Use slashes to create subtopics; each segment will be sanitized (whitespace → underscore, unsafe characters replaced), but `/` will be preserved to allow hierarchical subtopics.
+
 ### Prompt rules
 
 - Requests must include a `prompt` object that contains either `prompt.template` **or** `prompt.text` (or both). Requests missing both will be ignored and an error message will be published to `<basetopic>/OUTPUT` with the same `tag`.

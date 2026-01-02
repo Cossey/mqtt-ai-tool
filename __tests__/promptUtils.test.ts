@@ -5,8 +5,12 @@ describe('sanitizeOutgoingTopic', () => {
     expect(sanitizeOutgoingTopic('BACKYARD-SECURITY')).toBe('BACKYARD-SECURITY');
   });
 
-  test('trims slashes and spaces', () => {
-    expect(sanitizeOutgoingTopic('/BACKYARD/SECURITY/')).toBe('BACKYARD_SECURITY');
+  test('trims slashes and spaces, preserving segments', () => {
+    expect(sanitizeOutgoingTopic('/BACKYARD/SECURITY/')).toBe('BACKYARD/SECURITY');
+  });
+
+  test('sanitizes segments and preserves slash separator', () => {
+    expect(sanitizeOutgoingTopic('Back/yard:weird')).toBe('Back/yard_weird');
   });
 
   test('rejects wildcards', () => {

@@ -6,20 +6,34 @@ export function sanitizeOutgoingTopic(t: string): string | null {
         if (!t || typeof t !== 'string') return null;
         // Trim spaces and leading/trailing slashes
         let s = t.trim();
-        s = s.replace(/^\/+/, '').replace(/\/+$/, '');
+        s = s.replace(/^\/+|\/+$/g, '');
         if (s.length === 0) return null;
-        // Disallow wildcard characters
+        // Disallow wildcard characters anywhere
         if (s.includes('+') || s.includes('#')) return null;
-        // Disallow NUL and control chars
-        if (/[\u0000-\u001F\u007F]/.test(s)) return null;
-        // Replace path separators and colons with underscores
-        s = s.replace(/[\/:]+/g, '_');
-        // Replace whitespace with underscore
-        s = s.replace(/\s+/g, '_');
-        // Remove any remaining unsafe characters, allow alphanumeric, underscores, dashes and dots
-        s = s.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
-        if (s.length === 0) return null;
-        return s;
+        // Split into segments and sanitize each segment individually, preserving '/'
+        const segments = s.split('/').map(seg => seg.trim()).filter(seg => seg.length > 0);
+        if (segments.length === 0) return null;
+
+        const sanitizedSegments: string[] = [];
+        for (const seg of segments) {
+            // Disallow path traversal tokens
+            if (seg === '.' || seg === '..') return null;
+            // Disallow NUL and control chars
+            if (/^[\u0000-\u001F\u007F]+$/.test(seg)) return null;
+            if (/[\u0000-\u001F\u007F]/.test(seg)) return null;
+            // Replace whitespace with underscore
+            let sseg = seg.replace(/\s+/g, '_');
+            // Replace colons with underscore (common in names that include namespaces)
+            sseg = sseg.replace(/:+/g, '_');
+            // Remove any remaining unsafe characters, allow alphanumeric, underscores, dashes and dots
+            sseg = sseg.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+            if (sseg.length === 0) return null;
+            sanitizedSegments.push(sseg);
+        }
+
+        const result = sanitizedSegments.join('/');
+        if (result.length === 0) return null;
+        return result;
     } catch (e) {
         logger.warn(`sanitizeOutgoingTopic error: ${e}`);
         return null;

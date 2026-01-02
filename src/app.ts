@@ -176,7 +176,15 @@ export async function processPayload(payload: any) {
                 statusService.updateStatus(primaryCamera, 'Starting capture');
             }
 
-            for (const loader of payload.prompt.loader) {
+            for (let lIdx = 0; lIdx < payload.prompt.loader.length; lIdx++) {
+                const loader = payload.prompt.loader[lIdx];
+                const loaderNum = lIdx + 1;
+                const loaderTotal = payload.prompt.loader.length;
+
+                // Generic loader progress update
+                if (primaryCamera) statusService.updateStatus(primaryCamera, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
+                else statusService.updateStatus(undefined, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
+
                 if (loader.type === 'camera') {
                     const source = loader.source;
                     const cam = config.cameras[source];
@@ -207,39 +215,45 @@ export async function processPayload(payload: any) {
                     const interval = loader.options?.interval || 1000;
 
                     for (let i = 0; i < captures; i++) {
-                        // Update capture status
-                        statusService.updateStatus(source, 'Capturing');
+                        // Update capture status with capture count
+                        if (primaryCamera) statusService.updateStatus(source, `Capturing (${i + 1} of ${captures})`);
+                        else statusService.updateStatus(undefined, `Capturing (${i + 1} of ${captures})`);
 
                         const imagePath = await cameraService.captureImage(rtspUrl);
                         tempFiles.push(imagePath);
 
                         if (i < captures - 1 && interval > 0) {
-                            statusService.updateStatus(source, 'Waiting for next capture');
+                            if (primaryCamera) statusService.updateStatus(source, `Waiting for next capture (${i + 1} of ${captures})`);
+                            else statusService.updateStatus(undefined, `Waiting for next capture (${i + 1} of ${captures})`);
                             await new Promise(r => setTimeout(r, interval));
+                        } else {
+                            // Mark individual capture completed
+                            if (primaryCamera) statusService.updateStatus(source, `Captured (${i + 1} of ${captures})`);
+                            else statusService.updateStatus(undefined, `Captured (${i + 1} of ${captures})`);
                         }
                     }
                 } else if (loader.type === 'url') {
                     const sourceUrl = loader.source;
 
-                    // Progress update for URL fetch
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching URL: ${sourceUrl}`);
-                    else statusService.updateStatus(undefined, `Fetching URL: ${sourceUrl}`);
+                    // Progress update for URL fetch with loader counts
+                    if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
+                    else statusService.updateStatus(undefined, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
 
                     const tmpPath = await downloadUrlToTemp(sourceUrl);
                     tempFiles.push(tmpPath);
 
                     // Mark URL fetch completed
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, 'URL fetched');
-                    else statusService.updateStatus(undefined, 'URL fetched');
+                    if (primaryCamera) statusService.updateStatus(primaryCamera, `URL fetched (${loaderNum} of ${loaderTotal})`);
+                    else statusService.updateStatus(undefined, `URL fetched (${loaderNum} of ${loaderTotal})`);
                 } else if (loader.type === 'database') {
                     const source = loader.source;
                     const dbConfig = config.databases?.[source];
                     if (!dbConfig) throw new Error(`Unknown database source: ${source}`);
                     if (dbConfig.type !== 'mariadb') throw new Error(`Unsupported database type for ${source}: ${dbConfig.type}`);
 
-                    // Progress update for DB query
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, `Querying DB: ${source}`);
-                    else statusService.updateStatus(undefined, `Querying DB: ${source}`);
+                    // Progress update for DB query (with loader counts)
+                    if (primaryCamera) statusService.updateStatus(primaryCamera, `Querying DB ${loaderNum} of ${loaderTotal}: ${source}`);
+                    else statusService.updateStatus(undefined, `Querying DB ${loaderNum} of ${loaderTotal}: ${source}`);
 
                     const query = loader.options?.query;
 
@@ -369,15 +383,17 @@ export async function processPayload(payload: any) {
 
         mqttService.publish(outputTopic, JSON.stringify(out), false);
 
-        // Publish completion and stats for camera if applicable
+        // Publish completion and status updates for camera if applicable
         if (primaryCamera) {
             statusService.updateStatus(primaryCamera, 'Publishing response');
-            statusService.recordSuccess(primaryCamera, aiTime, totalTime);
         }
 
         // Clean up temp files (including images captured)
         if (primaryCamera) statusService.updateStatus(primaryCamera, 'Cleaning up');
         await cameraService.cleanupImageFiles(tempFiles);
+
+        // After cleanup, record success which sets the status to 'Complete'
+        if (primaryCamera) statusService.recordSuccess(primaryCamera, aiTime, totalTime);
 
         const endTime = Date.now();
         logger.info(`INPUT processing completed for tag="${payload?.tag}" in ${(endTime - startTime) / 1000}s`);
