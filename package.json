@@ -6,6 +6,8 @@
   "scripts": {
     "start": "ts-node src/app.ts",
     "build": "tsc",
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch",
     "docker:build": "docker build -t mqtt-camera-ai-monitor .",
     "docker:run": "docker run -p 3000:3000 mqtt-camera-ai-monitor"
   },
@@ -24,7 +26,10 @@
   "devDependencies": {
     "@types/mqtt": "^2.5.0",
     "@types/node": "^20.0.0",
-    "@types/js-yaml": "^4.0.5"
+    "@types/js-yaml": "^4.0.5",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "@types/jest": "^29.0.0"
   },
   "author": "Stewart Cossey",
   "license": "BSD-3-Clause"

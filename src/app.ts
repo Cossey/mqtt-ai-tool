@@ -5,11 +5,12 @@ import { StatusService } from './services/statusService';
 import { config } from './config/config';
 import { logger } from './utils/logger';
 import fs from 'fs';
+import { composeTemplateChain, sanitizeOutgoingTopic as sanitizeTopic, extractStructuredFromAiResponse as extractStructuredFromAiResponseUtil, buildJsonSchema as buildJsonSchemaUtil } from './utils/promptUtils';
 
-const mqttService = new MqttService(config.mqtt);
-const cameraService = new CameraService();
-const aiService = new AiService(config.ai);
-const statusService = new StatusService();
+export const mqttService = new MqttService(config.mqtt);
+export const cameraService = new CameraService();
+export const aiService = new AiService(config.ai);
+export const statusService = new StatusService();
 
 // Wire up status service events to MQTT publishing
 statusService.on('statusUpdate', (cameraName: string | undefined, status: string) => {
@@ -58,19 +59,7 @@ function publishQueueCount() {
     mqttService.publish(`${config.mqtt.basetopic}/QUEUED`, String(count), true);
 }
 
-async function processNextInput() {
-    if (inputQueue.length === 0) {
-        processing = false;
-        publishQueueCount();
-        return;
-    }
-
-    processing = true;
-    publishQueueCount();
-
-    const payload = inputQueue.shift();
-    logger.info(`Processing INPUT payload with tag="${payload?.tag}"`);
-
+export async function processPayload(payload: any) {
     const startTime = Date.now();
 
     // Determine primary camera for status updates (if any)
@@ -100,10 +89,7 @@ async function processNextInput() {
             logger.warn('INPUT payload missing both prompt.template and prompt.text - skipping processing');
             mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, error: 'Missing prompt.template and prompt.text' }), false);
             if (primaryCamera) statusService.recordError(primaryCamera, 'Missing prompt.template and prompt.text');
-            processing = false;
-            publishQueueCount();
-            setImmediate(() => processNextInput());
-            return;
+            return { skipped: true };
         }
 
         // Resolve template(s): support single name or an array of names to chain
@@ -112,54 +98,22 @@ async function processNextInput() {
         let templateResponseFormat: any = undefined;
 
         if (payload.prompt && payload.prompt.template) {
-            const names = Array.isArray(payload.prompt.template) ? payload.prompt.template : [payload.prompt.template];
+            const res = composeTemplateChain(payload.prompt.template, config.prompts);
+            templateText = res.text;
+            templateModel = res.model;
+            templateResponseFormat = res.response_format;
 
-            // Map names to prompt config entries (may be missing)
-            const configs = names.map((n: string) => ({ name: n, cfg: config.prompts?.[n] || null }));
-
-            // If none exist and there is no inline prompt.text, skip
-            const anyFound = configs.some((c: any) => c.cfg !== null);
-            if (!anyFound && !payload.prompt.text) {
-                logger.warn(`None of the specified templates found: ${JSON.stringify(names)} and no prompt.text provided - skipping`);
-                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, error: `Unknown prompt template(s): ${JSON.stringify(names)}` }), false);
-                if (primaryCamera) statusService.recordError(primaryCamera, `Unknown prompt template(s): ${JSON.stringify(names)}`);
-                processing = false;
-                publishQueueCount();
-                setImmediate(() => processNextInput());
-                return;
+            if (!templateText && !payload.prompt.text) {
+                logger.warn(`Unknown prompt template(s) and no prompt.text provided - skipping`);
+                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, error: `Unknown prompt template(s)` }), false);
+                if (primaryCamera) statusService.recordError(primaryCamera, `Unknown prompt template(s)`);
+                return { skipped: true };
             }
 
-            // Compose templates from right-to-left. Missing templates use empty string but are warned.
-            let current = '';
-            for (let i = configs.length - 1; i >= 0; i--) {
-                const entry = configs[i];
-                if (!entry.cfg) {
-                    logger.warn(`Template '${entry.name}' not found, inserting empty string`);
-                    // If nothing currently, keep current as is
-                    continue;
-                }
-                const tText = entry.cfg.prompt || '';
-                // Capture the first template-defined model/response_format from left to right
-                if (!templateModel && entry.cfg.model) templateModel = entry.cfg.model;
-                if (!templateResponseFormat && entry.cfg.response_format) templateResponseFormat = entry.cfg.response_format;
-
-                if (!current) {
-                    current = tText;
-                } else {
-                    if (/{{\s*template\s*}}/.test(tText)) {
-                        current = tText.replace(/{{\s*template\s*}}/g, current);
-                    } else {
-                        current = `${tText}\n\n${current}`;
-                    }
-                }
-            }
-
-            if (current) templateText = current;
-            // If templateResponseFormat provided, use that as default (may be overridden by inline output)
             if (templateResponseFormat) responseFormat = templateResponseFormat;
         }
 
-        // If inline text is provided, either inject into a {{prompt}} placeholder in the composed template or append
+        // Compose final promptText
         if (payload.prompt && payload.prompt.text) {
             const inlineText = payload.prompt.text;
 
@@ -168,7 +122,6 @@ async function processNextInput() {
             } else if (templateText) {
                 promptText = `${templateText}\n\n${inlineText}`;
             } else {
-                // No template: use inline text directly
                 promptText = inlineText;
             }
 
@@ -428,10 +381,33 @@ async function processNextInput() {
 
         const endTime = Date.now();
         logger.info(`INPUT processing completed for tag="${payload?.tag}" in ${(endTime - startTime) / 1000}s`);
+
+        return { outputTopic, out };
     } catch (error) {
         logger.error(`Error processing INPUT payload: ${error}`);
         // Record error on camera stats if we have one
         if (primaryCamera) statusService.recordError(primaryCamera, error as any);
+        throw error;
+    }
+}
+
+async function processNextInput() {
+    if (inputQueue.length === 0) {
+        processing = false;
+        publishQueueCount();
+        return;
+    }
+
+    processing = true;
+    publishQueueCount();
+
+    const payload = inputQueue.shift();
+    logger.info(`Processing INPUT payload with tag="${payload?.tag}"`);
+
+    try {
+        await processPayload(payload);
+    } catch (error) {
+        logger.error(`Error processing INPUT payload: ${error}`);
     } finally {
         // Continue with next input
         processing = false;
@@ -440,6 +416,8 @@ async function processNextInput() {
         setImmediate(() => processNextInput());
     }
 }
+
+
 
 function extractTextFromAiResponse(resp: any): string {
     try {
@@ -460,55 +438,7 @@ function extractTextFromAiResponse(resp: any): string {
     }
 }
 
-function extractStructuredFromAiResponse(resp: any, responseFormat?: any): any {
-    try {
-        if (!resp) return null;
-
-        // 1) Preferred: top-level 'output' object (OpenAI structured outputs)
-        if (resp.output && typeof resp.output === 'object' && Object.keys(resp.output).length > 0) {
-            return resp.output;
-        }
-
-        // 2) Some APIs return data.output or result.output
-        if (resp.data && resp.data.output && typeof resp.data.output === 'object') return resp.data.output;
-        if (resp.result && resp.result.output && typeof resp.result.output === 'object') return resp.result.output;
-
-        // 3) Check choices[0].message.content for structured output
-        if (resp.choices && resp.choices.length > 0 && resp.choices[0].message) {
-            const content = resp.choices[0].message.content;
-            if (typeof content === 'object' && Object.keys(content).length > 0) {
-                return content; // structured object directly returned
-            }
-            if (typeof content === 'string') {
-                const trimmed = content.trim();
-                // Exact JSON object/array
-                if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-                    try {
-                        return JSON.parse(trimmed);
-                    } catch (e) {
-                        // Not valid JSON
-                    }
-                }
-
-                // Try to extract the first JSON object-looking substring
-                const firstJsonMatch = trimmed.match(/\{[\s\S]*\}/);
-                if (firstJsonMatch) {
-                    try {
-                        return JSON.parse(firstJsonMatch[0]);
-                    } catch (e) {
-                        // ignore parse errors
-                    }
-                }
-            }
-        }
-
-        // If responseFormat indicates json_schema but we couldn't extract, return null rather than raw response
-        return null;
-    } catch (e) {
-        logger.warn(`Failed to extract structured output from AI response: ${e}`);
-        return null;
-    }
-}
+function extractStructuredFromAiResponse(resp: any, responseFormat?: any): any { return extractStructuredFromAiResponseUtil(resp, responseFormat); }
 
 function rowsToCsv(rows: any[]): string {
     if (!rows || rows.length === 0) return '';
@@ -577,50 +507,9 @@ async function writeBufferToTemp(buf: Buffer, topic: string, mime?: string): Pro
     fs.writeFileSync(tmpPath, buf);
     return tmpPath;
 }
-function buildJsonSchema(properties: any): any {
-    return Object.fromEntries(
-        Object.entries(properties).map(([key, prop]: [string, any]) => [
-            key,
-            {
-                ...prop,
-                ...(prop.type === 'object' &&
-                    prop.properties && {
-                        properties: buildJsonSchema(prop.properties),
-                        additionalProperties: false,
-                        required: Object.keys(prop.properties),
-                    }),
-                ...(prop.type === 'array' &&
-                    prop.items?.type === 'object' &&
-                    prop.items.properties && {
-                        items: {
-                            ...prop.items,
-                            properties: buildJsonSchema(prop.items.properties),
-                            additionalProperties: false,
-                            required: Object.keys(prop.items.properties),
-                        },
-                    }),
-            },
-        ])
-    );
-}
+function buildJsonSchema(properties: any): any { return buildJsonSchemaUtil(properties); }
 
-function sanitizeOutgoingTopic(t: string): string | null {
-    try {
-        if (!t || typeof t !== 'string') return null;
-        // Trim spaces and leading/trailing slashes
-        let s = t.trim();
-        s = s.replace(/^\/+/, '').replace(/\/+$/, '');
-        if (s.length === 0) return null;
-        // Disallow wildcard characters
-        if (s.includes('+') || s.includes('#')) return null;
-        // Disallow NUL and control chars
-        if (/[ -]/.test(s)) return null;
-        // All good, return sanitized string
-        return s;
-    } catch (e) {
-        return null;
-    }
-}
+function sanitizeOutgoingTopic(t: string): string | null { return sanitizeTopic(t); }
 
 async function downloadUrlToTemp(url: string): Promise<string> {
     const axios = (await import('axios')).default;
