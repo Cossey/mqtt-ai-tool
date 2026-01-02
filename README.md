@@ -311,7 +311,7 @@ Note: Capture counts and intervals are provided via the INPUT `loader` entries w
 docker run -d \
   --name mqtt-ai-tool \
   -v /path/to/your/config.yaml:/usr/src/app/config.yaml \
-  kosdk/mqtt-camera-ai-monitor:latest
+  kosdk/mqtt-ai-tool:latest
 ```
 
 #### Using Custom Config Location (Docker)
