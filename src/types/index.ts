@@ -67,12 +67,30 @@ export interface DatabaseConfig {
     database: string;
 }
 
+export interface TaskConfig {
+    ai?: string; // AI backend to use
+    topic?: string; // Optional topic routing
+    prompt: {
+        template?: string | string[]; // Prompt template name(s)
+        text?: string; // Inline prompt text
+        output?: Record<string, JsonSchemaProperty>; // Structured output schema
+        model?: string; // Optional model override
+        files?: string[]; // Files to attach
+        loader?: Array<{
+            type: string;
+            source: string;
+            options?: Record<string, any>;
+        }>;
+    };
+}
+
 export interface Config {
     mqtt: MqttConfig;
     ai: Record<string, AiConfig>;
     cameras: Record<string, CameraConfig>;
     prompts?: Record<string, PromptConfig>;
     databases?: Record<string, DatabaseConfig>;
+    tasks?: Record<string, TaskConfig>;
 }
 
 export interface AiResponse {
@@ -101,6 +119,21 @@ export interface CameraStats {
     lastSuccessDate?: string; // ISO datetime string
     lastAiProcessTime?: number; // seconds
     lastTotalProcessTime?: number; // seconds
+    loader?: {
+        camera?: Record<string, {
+            lastCaptureTime?: number; // seconds per single capture (not including intervals)
+            lastTotalCaptureTime?: number; // seconds from start to finish of all captures
+        }>;
+        url?: Record<number, {
+            lastDownloadTime?: number; // seconds
+            lastHTTPCode?: number; // HTTP response code
+            lastFileSize?: number; // bytes
+        }>;
+        database?: Record<string, Record<number, {
+            lastQueryTime?: number; // seconds
+            lastQueryRows?: number; // number of rows returned
+        }>>;
+    };
 }
 
 export interface CameraStatusManager {

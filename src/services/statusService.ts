@@ -28,8 +28,45 @@ export class StatusService extends EventEmitter {
             this.cameraStats[cameraName] = {};
         }
 
-        // Update only the provided fields
-        Object.assign(this.cameraStats[cameraName], stats);
+        // Deep merge for nested loader stats
+        if (stats.loader) {
+            if (!this.cameraStats[cameraName].loader) {
+                this.cameraStats[cameraName].loader = {};
+            }
+
+            if (stats.loader.camera) {
+                if (!this.cameraStats[cameraName].loader!.camera) {
+                    this.cameraStats[cameraName].loader!.camera = {};
+                }
+                Object.assign(this.cameraStats[cameraName].loader!.camera!, stats.loader.camera);
+            }
+
+            if (stats.loader.url) {
+                if (!this.cameraStats[cameraName].loader!.url) {
+                    this.cameraStats[cameraName].loader!.url = {};
+                }
+                Object.assign(this.cameraStats[cameraName].loader!.url!, stats.loader.url);
+            }
+
+            if (stats.loader.database) {
+                if (!this.cameraStats[cameraName].loader!.database) {
+                    this.cameraStats[cameraName].loader!.database = {};
+                }
+                for (const dbSource in stats.loader.database) {
+                    if (!this.cameraStats[cameraName].loader!.database![dbSource]) {
+                        this.cameraStats[cameraName].loader!.database![dbSource] = {};
+                    }
+                    Object.assign(this.cameraStats[cameraName].loader!.database![dbSource], stats.loader.database[dbSource]);
+                }
+            }
+
+            // Remove loader from stats to avoid double assignment
+            const { loader, ...restStats } = stats;
+            Object.assign(this.cameraStats[cameraName], restStats);
+        } else {
+            // Simple update for non-loader fields
+            Object.assign(this.cameraStats[cameraName], stats);
+        }
 
         logger.debug(`Stats updated for camera ${cameraName}: ${JSON.stringify(stats)}`);
 

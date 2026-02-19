@@ -93,6 +93,17 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(outObj.text).toMatch(/Just some text/);
     });
 
+    test('OUTPUT tag is empty string when not provided in INPUT', async () => {
+        (aiService.sendFilesAndPrompt as jest.Mock).mockResolvedValue({ choices: [{ message: { content: 'OK' } }] });
+        await processPayload({ prompt: { text: 'No tag provided' } } as any);
+
+        const publishCalls = (mqttService.publish as jest.Mock).mock.calls;
+        const outCall = publishCalls.find((c: any) => typeof c[0] === 'string' && c[0].startsWith(`${config.mqtt.basetopic}/OUTPUT`));
+        expect(outCall).toBeDefined();
+        const outObj = JSON.parse(outCall[1]);
+        expect(outObj.tag).toBe('');
+    });
+
     test('status updates are emitted for camera loader and output published to sanitized topic', async () => {
         (aiService.sendFilesAndPrompt as jest.Mock).mockResolvedValue({ choices: [{ message: { content: 'OK' } }] });
 

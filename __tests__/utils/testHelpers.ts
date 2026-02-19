@@ -55,6 +55,7 @@ export async function importAppWithMocks(overrides: ServiceOverrides = {}) {
     const statusDefault = {
         on: () => {},
         updateStatus: () => {},
+        updateStats: () => {},
         recordError: () => {},
         recordSuccess: () => {},
     };

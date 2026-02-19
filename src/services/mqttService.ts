@@ -123,6 +123,19 @@ export class MqttService extends EventEmitter {
             logger.info('Received INPUT message');
             try {
                 const payload = JSON.parse(message);
+
+                // Ignore empty initialization payloads (empty objects or objects without prompt)
+                if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
+                    logger.debug('Ignoring empty INPUT payload (initialization message)');
+                    return;
+                }
+
+                // Check if this is just an initialization message without actual content
+                if (!payload.prompt && !payload.task && !payload.ai && !payload.topic) {
+                    logger.debug('Ignoring INPUT payload without required fields (initialization message)');
+                    return;
+                }
+
                 this.emit('input', payload);
             } catch (error) {
                 logger.error(`Failed to parse INPUT payload as JSON: ${error}`);
@@ -234,8 +247,11 @@ export class MqttService extends EventEmitter {
         }
     }
 
-    public publishStats(cameraName: string, stats: CameraStats) {
-        const topic = `${this.config.basetopic}/STATS`;
+    public publishStats(cameraName: string, stats: CameraStats, subtopic?: string | null) {
+        let topic = `${this.config.basetopic}/STATS`;
+        if (subtopic && typeof subtopic === 'string' && subtopic.length > 0) {
+            topic = `${this.config.basetopic}/STATS/${subtopic}`;
+        }
         const message = JSON.stringify({ camera: cameraName, stats });
         this.publish(topic, message, true); // Retained
     }
@@ -243,9 +259,13 @@ export class MqttService extends EventEmitter {
     /**
      * Publish a short progress/status update as plain text (no JSON). Uses the PROGRESS topic and retains the message.
      * If cameraName is provided, the message will be: "<cameraName>: <status>" otherwise it's just the status text.
+     * If subtopic is provided, publishes to PROGRESS/<subtopic> instead of PROGRESS.
      */
-    public publishProgress(cameraName: string | undefined, status: string) {
-        const topic = `${this.config.basetopic}/PROGRESS`;
+    public publishProgress(cameraName: string | undefined, status: string, subtopic?: string | null) {
+        let topic = `${this.config.basetopic}/PROGRESS`;
+        if (subtopic && typeof subtopic === 'string' && subtopic.length > 0) {
+            topic = `${this.config.basetopic}/PROGRESS/${subtopic}`;
+        }
         const message = cameraName && cameraName.length > 0 ? `${cameraName}: ${status}` : status;
         this.publish(topic, message, true); // Retained
     }
@@ -268,7 +288,7 @@ export class MqttService extends EventEmitter {
 
         // Initialize retained base topics
         this.publish(inputTopic, JSON.stringify({}), true);
-        this.publish(outputTopic, JSON.stringify({}), true);
+        // do NOT publish an initial base OUTPUT (runtime responses are published non-retained to OUTPUT and subtopics)
         this.publish(statsTopic, JSON.stringify({}), true);
         // PROGRESS is plain text; initialize with a generic Idle message
         this.publish(progressTopic, 'Idle', true);

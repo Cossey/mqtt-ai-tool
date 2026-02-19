@@ -117,6 +117,90 @@ export function buildJsonSchema(properties: any): any {
     );
 }
 
+// Merge two property maps (left then right) where right overrides duplicates.
+function mergeProperties(left: Record<string, any> | undefined, right: Record<string, any> | undefined): Record<string, any> {
+    const out: Record<string, any> = {};
+    if (left) {
+        for (const [k, v] of Object.entries(left)) {
+            out[k] = JSON.parse(JSON.stringify(v));
+        }
+    }
+    if (right) {
+        for (const [k, v] of Object.entries(right)) {
+            if (out[k] && out[k].type === 'object' && v.type === 'object' && out[k].properties && v.properties) {
+                // recursively merge nested object properties (right wins on duplicate subkeys)
+                out[k] = {
+                    ...out[k],
+                    properties: mergeProperties(out[k].properties, v.properties),
+                };
+                // if the right side defines items/required/other details, copy them across
+                if (v.required) out[k].required = v.required.slice();
+                if (v.additionalProperties !== undefined) out[k].additionalProperties = v.additionalProperties;
+            } else {
+                // right side overrides entirely for non-object or conflicting types
+                out[k] = JSON.parse(JSON.stringify(v));
+            }
+        }
+    }
+    return out;
+}
+
+// Merge two JSON-schema objects (both with { type: 'object', properties: {...}, required: [...], additionalProperties: bool })
+function mergeJsonSchema(left: any, right: any): any {
+    const leftProps = left?.properties || {};
+    const rightProps = right?.properties || {};
+
+    // start with left properties then apply right (right wins for duplicates)
+    const mergedProperties = mergeProperties(leftProps, rightProps);
+
+    // compute required with last-wins for properties that are re-defined by right
+    const requiredMap: Record<string, boolean> = {};
+
+    // initialize from left
+    for (const k of Object.keys(leftProps)) {
+        requiredMap[k] = Array.isArray(left.required) && left.required.includes(k);
+    }
+
+    // apply right (overrides previous entries for keys present in right)
+    for (const k of Object.keys(rightProps)) {
+        requiredMap[k] = Array.isArray(right.required) && right.required.includes(k);
+    }
+
+    const required = Object.entries(requiredMap).filter(([_k, v]) => v).map(([k]) => k);
+
+    return {
+        type: 'object',
+        properties: mergedProperties,
+        additionalProperties: right.additionalProperties !== undefined ? right.additionalProperties : left.additionalProperties,
+        required,
+    };
+}
+
+// Merge multiple response_format objects (supports json_schema merging). Rightmost definitions take precedence for duplicates.
+function mergeResponseFormats(formats: any[]): any {
+    if (!formats || formats.length === 0) return undefined;
+    if (formats.length === 1) return JSON.parse(JSON.stringify(formats[0]));
+
+    // Start from the left and fold-right with last-wins semantics for conflicts
+    let acc = JSON.parse(JSON.stringify(formats[0]));
+    for (let i = 1; i < formats.length; i++) {
+        const next = formats[i];
+        if (acc.type === 'json_schema' && next.type === 'json_schema') {
+            acc = JSON.parse(JSON.stringify(acc));
+            acc.json_schema = acc.json_schema || {};
+            acc.json_schema.schema = mergeJsonSchema(acc.json_schema.schema || {}, next.json_schema.schema || {});
+            // prefer the rightmost name/strict if present
+            acc.json_schema.name = next.json_schema?.name || acc.json_schema.name;
+            acc.json_schema.strict = next.json_schema?.strict !== undefined ? next.json_schema.strict : acc.json_schema.strict;
+        } else {
+            // fallback: types differ or unsupported - last wins
+            acc = JSON.parse(JSON.stringify(next));
+        }
+    }
+
+    return acc;
+}
+
 export function composeTemplateChain(templateNames: string[] | string, promptsConfig: Record<string, PromptConfig> | undefined): { text?: string; model?: string; response_format?: any } {
     const names = Array.isArray(templateNames) ? templateNames : [templateNames];
 
@@ -126,15 +210,19 @@ export function composeTemplateChain(templateNames: string[] | string, promptsCo
     const anyFound = configs.some((c) => c.cfg !== null);
     if (!anyFound) return { text: undefined };
 
-    // pick first model/response_format from left-to-right
+    // collect model (rightmost wins) and collect all response_format entries for merging
     let templateModel: string | undefined;
-    let templateResponseFormat: any | undefined;
+    const responseFormats: any[] = [];
     for (const entry of configs) {
         if (entry.cfg) {
-            if (!templateModel && entry.cfg.model) templateModel = entry.cfg.model;
-            if (!templateResponseFormat && entry.cfg.response_format) templateResponseFormat = entry.cfg.response_format;
+            if (entry.cfg.model) templateModel = entry.cfg.model; // overwrite => rightmost wins
+            if (entry.cfg.response_format) responseFormats.push(entry.cfg.response_format);
         }
     }
+
+    let templateResponseFormat: any | undefined = undefined;
+    if (responseFormats.length === 1) templateResponseFormat = responseFormats[0];
+    else if (responseFormats.length > 1) templateResponseFormat = mergeResponseFormats(responseFormats);
 
     // compose right-to-left
     let current = '';

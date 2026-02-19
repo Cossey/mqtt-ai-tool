@@ -225,6 +225,44 @@ function processPromptsConfig(config: Config) {
             }
         }
     }
+
+    // Validate tasks configuration
+    if (config.tasks) {
+        for (const [taskName, task] of Object.entries(config.tasks)) {
+            if (!task.prompt) {
+                throw new Error(`Task ${taskName} missing required 'prompt' field`);
+            }
+
+            // Validate AI backend if specified
+            if (task.ai && !config.ai[task.ai]) {
+                throw new Error(`Task ${taskName} references unknown AI backend: ${task.ai}`);
+            }
+
+            // Validate prompt templates if used
+            if (task.prompt.template) {
+                const templates = Array.isArray(task.prompt.template) ? task.prompt.template : [task.prompt.template];
+                for (const tname of templates) {
+                    if (config.prompts && !config.prompts[tname]) {
+                        throw new Error(`Task ${taskName} references unknown prompt template: ${tname}`);
+                    }
+                }
+            }
+
+            // Validate camera sources in loaders
+            if (task.prompt.loader) {
+                for (const loader of task.prompt.loader) {
+                    if (loader.type === 'camera' && !config.cameras[loader.source]) {
+                        throw new Error(`Task ${taskName} references unknown camera: ${loader.source}`);
+                    }
+                    if (loader.type === 'database' && (!config.databases || !config.databases[loader.source])) {
+                        throw new Error(`Task ${taskName} references unknown database: ${loader.source}`);
+                    }
+                }
+            }
+
+            logger.debug(`Task ${taskName} validated successfully`);
+        }
+    }
 }
 
 function buildJsonSchema(properties: any): any {

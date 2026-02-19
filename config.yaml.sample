@@ -107,3 +107,67 @@ databases:
     username: dbuser
     password_file: /run/secrets/db_password
     database: exampledb
+
+# Task templates: Pre-configured tasks that combine prompts with loaders
+# Tasks reduce repetitive JSON in INPUT requests - just reference the task name
+tasks:
+  # Simple single-camera task
+  garage_check:
+    ai: openai
+    topic: garage/monitoring
+    prompt:
+      template: garage_prompt
+      loader:
+        - type: camera
+          source: garage
+          options:
+            captures: 1
+
+  # Multi-image motion detection task
+  gate_motion:
+    ai: openai
+    topic: gate/security
+    prompt:
+      template: driveway_motion
+      loader:
+        - type: camera
+          source: gate
+          options:
+            captures: 5
+            interval: 2000
+
+  # Task with multiple template chaining (templates are processed left-to-right)
+  # The second template is inserted into the first template's {{template}} placeholder
+  comprehensive_check:
+    ai: openai
+    topic: monitoring/comprehensive
+    prompt:
+      template: ["gate_prompt", "garage_prompt"]
+      text: "Provide a combined analysis of both locations"
+      loader:
+        - type: camera
+          source: gate
+          options:
+            captures: 1
+        - type: camera
+          source: garage
+          options:
+            captures: 1
+
+  # Task combining database query with URL fetch
+  daily_report:
+    ai: openai
+    prompt:
+      text: "Generate a comprehensive daily report based on the attached data"
+      loader:
+        - type: database
+          source: main
+          options:
+            query: "SELECT * FROM events WHERE date = CURDATE()"
+            attach: csv
+        - type: url
+          source: "https://api.example.com/weather"
+
+# Usage examples:
+# Simple task: mosquitto_pub -t "mqttai/INPUT" -m '{"task":"garage_check","tag":"check-001"}'
+# With override: mosquitto_pub -t "mqttai/INPUT" -m '{"task":"gate_motion","tag":"alert","topic":"gate/urgent"}'

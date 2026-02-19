@@ -12,13 +12,16 @@ export const cameraService = new CameraService();
 export const aiService = new AiService(config.ai);
 export const statusService = new StatusService();
 
+// Track the current processing topic (sanitized) for PROGRESS and STATS routing
+let currentProcessingTopic: string | null = null;
+
 // Wire up status service events to MQTT publishing
 statusService.on('statusUpdate', (cameraName: string | undefined, status: string) => {
-    mqttService.publishProgress(cameraName, status);
+    mqttService.publishProgress(cameraName, status, currentProcessingTopic);
 });
 
 statusService.on('statsUpdate', (cameraName: string, stats: any) => {
-    mqttService.publishStats(cameraName, stats);
+    mqttService.publishStats(cameraName, stats, currentProcessingTopic);
 });
 
 // Input queue for sequential processing
@@ -47,6 +50,18 @@ async function initialize() {
 }
 
 function enqueueInput(payload: any) {
+    // Additional safety check: ignore empty or invalid payloads
+    if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
+        logger.debug('Skipping empty payload in enqueueInput');
+        return;
+    }
+
+    // Check if payload has either a prompt field OR a task field (minimum required)
+    if (!payload.prompt && !payload.task) {
+        logger.debug('Skipping payload without prompt or task field in enqueueInput');
+        return;
+    }
+
     inputQueue.push(payload);
     publishQueueCount();
     if (!processing) {
@@ -61,6 +76,58 @@ function publishQueueCount() {
 
 export async function processPayload(payload: any) {
     const startTime = Date.now();
+
+    // Task resolution: if payload references a task, merge task template with payload overrides
+    if (payload.task && typeof payload.task === 'string') {
+        const taskName = payload.task;
+        const taskTemplate = config.tasks?.[taskName];
+
+        if (!taskTemplate) {
+            logger.error(`Unknown task referenced: ${taskName}`);
+            mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({
+                tag: payload.tag,
+                error: `Unknown task: ${taskName}`
+            }), false);
+            return { skipped: true };
+        }
+
+        logger.info(`Resolving task template: ${taskName}`);
+
+        // Merge task template with payload, giving priority to payload overrides
+        payload = {
+            ai: payload.ai || taskTemplate.ai,
+            topic: payload.topic || taskTemplate.topic,
+            tag: payload.tag, // Keep original tag if provided
+            prompt: {
+                template: payload.prompt?.template || taskTemplate.prompt.template,
+                text: payload.prompt?.text || taskTemplate.prompt.text,
+                output: payload.prompt?.output || taskTemplate.prompt.output,
+                model: payload.prompt?.model || taskTemplate.prompt.model,
+                files: payload.prompt?.files || taskTemplate.prompt.files,
+                loader: payload.prompt?.loader || taskTemplate.prompt.loader
+            }
+        };
+
+        logger.debug(`Task ${taskName} resolved with overrides: ${JSON.stringify(payload)}`);
+    }
+
+    // Sanitize and set the current processing topic for PROGRESS/STATS routing
+    currentProcessingTopic = null;
+    if (payload.topic && typeof payload.topic === 'string') {
+        const sanitized = sanitizeOutgoingTopic(payload.topic);
+        if (sanitized) {
+            currentProcessingTopic = sanitized;
+            logger.debug(`Using topic "${sanitized}" for OUTPUT/PROGRESS/STATS routing`);
+        } else {
+            logger.warn(`Invalid payload.topic provided: ${payload.topic} - will use base topics`);
+            // notify subscribers via MQTT that the requested subtopic was invalid and we're falling back
+            try {
+                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag || '', warning: `Invalid topic specified: ${payload.topic}` }), false);
+            } catch (e) {
+                logger.warn(`Failed to publish invalid-topic warning: ${e}`);
+            }
+        }
+    }
 
     // Determine primary camera for status updates (if any)
     const primaryCamera = Array.isArray(payload?.prompt?.loader)
@@ -87,7 +154,7 @@ export async function processPayload(payload: any) {
         // Validate prompt existence: must provide either prompt.template or prompt.text
         if (!payload.prompt || (!payload.prompt.template && !payload.prompt.text)) {
             logger.warn('INPUT payload missing both prompt.template and prompt.text - skipping processing');
-            mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, error: 'Missing prompt.template and prompt.text' }), false);
+            mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag || '', error: 'Missing prompt.template and prompt.text' }), false);
             if (primaryCamera) statusService.recordError(primaryCamera, 'Missing prompt.template and prompt.text');
             return { skipped: true };
         }
@@ -105,7 +172,7 @@ export async function processPayload(payload: any) {
 
             if (!templateText && !payload.prompt.text) {
                 logger.warn(`Unknown prompt template(s) and no prompt.text provided - skipping`);
-                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, error: `Unknown prompt template(s)` }), false);
+                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag || '', error: `Unknown prompt template(s)` }), false);
                 if (primaryCamera) statusService.recordError(primaryCamera, `Unknown prompt template(s)`);
                 return { skipped: true };
             }
@@ -148,7 +215,7 @@ export async function processPayload(payload: any) {
 
         // If model override exists, prioritize inline override, then first template model, then backend default
         if (!payload.prompt?.model && templateModel) {
-            // templateModel is set from first (leftmost) template that specified a model
+            // templateModel is set from last (rightmost) template that specified a model (child overrides parent)
             // We do not assign here; usedModel computed later
         }
 
@@ -176,10 +243,18 @@ export async function processPayload(payload: any) {
                 statusService.updateStatus(primaryCamera, 'Starting capture');
             }
 
+            // Loader type counters (1-based index per type)
+            const loaderTypeCounters: Record<string, number> = {};
+
             for (let lIdx = 0; lIdx < payload.prompt.loader.length; lIdx++) {
                 const loader = payload.prompt.loader[lIdx];
                 const loaderNum = lIdx + 1;
                 const loaderTotal = payload.prompt.loader.length;
+
+                // Increment counter for this loader type
+                if (!loaderTypeCounters[loader.type]) loaderTypeCounters[loader.type] = 0;
+                loaderTypeCounters[loader.type]++;
+                const loaderTypeIndex = loaderTypeCounters[loader.type];
 
                 // Generic loader progress update
                 if (primaryCamera) statusService.updateStatus(primaryCamera, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
@@ -214,12 +289,20 @@ export async function processPayload(payload: any) {
                     const captures = loader.options?.captures || 1;
                     const interval = loader.options?.interval || 1000;
 
+                    const captureStartTime = Date.now();
+                    let totalCaptureTime = 0; // Track actual capture time (excluding intervals)
+
                     for (let i = 0; i < captures; i++) {
                         // Update capture status with capture count
                         if (primaryCamera) statusService.updateStatus(source, `Capturing (${i + 1} of ${captures})`);
                         else statusService.updateStatus(undefined, `Capturing (${i + 1} of ${captures})`);
 
+                        const singleCaptureStart = Date.now();
                         const imagePath = await cameraService.captureImage(rtspUrl);
+                        const singleCaptureEnd = Date.now();
+                        const singleCaptureTime = (singleCaptureEnd - singleCaptureStart) / 1000;
+                        totalCaptureTime += singleCaptureTime;
+
                         tempFiles.push(imagePath);
 
                         if (i < captures - 1 && interval > 0) {
@@ -232,6 +315,22 @@ export async function processPayload(payload: any) {
                             else statusService.updateStatus(undefined, `Captured (${i + 1} of ${captures})`);
                         }
                     }
+
+                    const totalElapsedTime = (Date.now() - captureStartTime) / 1000;
+
+                    // Record camera capture metrics
+                    if (primaryCamera) {
+                        statusService.updateStats(primaryCamera, {
+                            loader: {
+                                camera: {
+                                    [source]: {
+                                        lastCaptureTime: totalCaptureTime / captures, // Average per capture
+                                        lastTotalCaptureTime: totalElapsedTime
+                                    }
+                                }
+                            }
+                        });
+                    }
                 } else if (loader.type === 'url') {
                     const sourceUrl = loader.source;
 
@@ -239,8 +338,30 @@ export async function processPayload(payload: any) {
                     if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
                     else statusService.updateStatus(undefined, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
 
-                    const tmpPath = await downloadUrlToTemp(sourceUrl);
+                    const urlStartTime = Date.now();
+                    const { tmpPath, httpCode, fileSize } = await downloadUrlToTempWithMetrics(sourceUrl);
+                    const urlElapsedTime = (Date.now() - urlStartTime) / 1000;
+
                     tempFiles.push(tmpPath);
+
+                    // Record URL metrics
+                    if (primaryCamera) {
+                        const existingLoaderStats = statusService.getStats(primaryCamera).loader || {};
+                        const existingUrlStats = existingLoaderStats.url || {};
+                        statusService.updateStats(primaryCamera, {
+                            loader: {
+                                ...existingLoaderStats,
+                                url: {
+                                    ...existingUrlStats,
+                                    [loaderTypeIndex]: {
+                                        lastDownloadTime: urlElapsedTime,
+                                        lastHTTPCode: httpCode,
+                                        lastFileSize: fileSize
+                                    }
+                                }
+                            }
+                        });
+                    }
 
                     // Mark URL fetch completed
                     if (primaryCamera) statusService.updateStatus(primaryCamera, `URL fetched (${loaderNum} of ${loaderTotal})`);
@@ -272,10 +393,35 @@ export async function processPayload(payload: any) {
                     });
 
                     try {
+                        const queryStartTime = Date.now();
                         const rows = await conn.query(query);
+                        const queryElapsedTime = (Date.now() - queryStartTime) / 1000;
 
                         // Ensure rows is an array of objects
                         const resultRows = Array.isArray(rows) ? rows : [rows];
+                        const rowCount = resultRows.length;
+
+                        // Record database query metrics
+                        if (primaryCamera) {
+                            const existingLoaderStats = statusService.getStats(primaryCamera).loader || {};
+                            const existingDbStats = existingLoaderStats.database || {};
+                            const existingSourceStats = existingDbStats[source] || {};
+                            statusService.updateStats(primaryCamera, {
+                                loader: {
+                                    ...existingLoaderStats,
+                                    database: {
+                                        ...existingDbStats,
+                                        [source]: {
+                                            ...existingSourceStats,
+                                            [loaderTypeIndex]: {
+                                                lastQueryTime: queryElapsedTime,
+                                                lastQueryRows: rowCount
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
 
                         if (attach === 'csv') {
                             // Convert to CSV
@@ -361,24 +507,17 @@ export async function processPayload(payload: any) {
         const structured = extractStructuredFromAiResponse(response, responseFormat);
 
         const out = {
-            tag: payload.tag,
+            tag: payload.tag || '',
             time: totalTime,
             model: usedModel,
             text: extractTextFromAiResponse(response),
             json: structured || null,
         };
 
-        // Determine output topic: support optional payload.topic which maps to basetopic/OUTPUT/<topic>
+        // Determine output topic: use currentProcessingTopic if available
         let outputTopic = `${config.mqtt.basetopic}/OUTPUT`;
-        if (payload.topic && typeof payload.topic === 'string') {
-            const sanitized = sanitizeOutgoingTopic(payload.topic);
-            if (sanitized) {
-                outputTopic = `${config.mqtt.basetopic}/OUTPUT/${sanitized}`;
-            } else {
-                logger.warn(`Invalid payload.topic provided: ${payload.topic} - falling back to base OUTPUT topic`);
-                // publish a warning to base OUTPUT (do not change behavior of stats)
-                mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({ tag: payload.tag, warning: 'Invalid topic specified; using base OUTPUT' }), false);
-            }
+        if (currentProcessingTopic) {
+            outputTopic = `${config.mqtt.basetopic}/OUTPUT/${currentProcessingTopic}`;
         }
 
         mqttService.publish(outputTopic, JSON.stringify(out), false);
@@ -404,6 +543,9 @@ export async function processPayload(payload: any) {
         // Record error on camera stats if we have one
         if (primaryCamera) statusService.recordError(primaryCamera, error as any);
         throw error;
+    } finally {
+        // Clear the current processing topic after processing is complete
+        currentProcessingTopic = null;
     }
 }
 
@@ -528,6 +670,11 @@ function buildJsonSchema(properties: any): any { return buildJsonSchemaUtil(prop
 function sanitizeOutgoingTopic(t: string): string | null { return sanitizeTopic(t); }
 
 async function downloadUrlToTemp(url: string): Promise<string> {
+    const result = await downloadUrlToTempWithMetrics(url);
+    return result.tmpPath;
+}
+
+async function downloadUrlToTempWithMetrics(url: string): Promise<{ tmpPath: string; httpCode: number; fileSize: number }> {
     const axios = (await import('axios')).default;
     const os = await import('os');
     const path = await import('path');
@@ -538,8 +685,14 @@ async function downloadUrlToTemp(url: string): Promise<string> {
     const tmpPath = path.join(os.tmpdir(), tmpName);
 
     const response = await axios.get(url, { responseType: 'arraybuffer', validateStatus: () => true });
-    fs.writeFileSync(tmpPath, Buffer.from(response.data));
-    return tmpPath;
+    const buffer = Buffer.from(response.data);
+    fs.writeFileSync(tmpPath, buffer);
+
+    return {
+        tmpPath,
+        httpCode: response.status,
+        fileSize: buffer.length
+    };
 }
 
 // Graceful shutdown function
