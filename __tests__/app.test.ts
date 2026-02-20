@@ -104,6 +104,86 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(outObj.tag).toBe('');
     });
 
+    test('publishes Home Assistant discovery for tasks with ha:true', async () => {
+        // enable HA in config and mark a task for discovery
+        config.mqtt.homeassistant = 'homeassistant';
+        // ensure tasks map exists and enable HA discovery for a gate_motion task (create if missing)
+        if (!config.tasks) config.tasks = {} as any;
+        if (!config.tasks['gate_motion']) {
+            config.tasks['gate_motion'] = { topic: 'gate/security', prompt: { template: 'driveway_motion' } } as any;
+        }
+        config.tasks['gate_motion'].ha = true;
+        expect(config.tasks['gate_motion'].ha).toBe(true);
+
+        // call discovery publisher
+        (mqttService.publish as jest.Mock).mockClear();
+        await (await import('../src/app')).publishHaDiscovery();
+
+        const publishCalls = (mqttService.publish as jest.Mock).mock.calls;
+        const discoveryCalls = publishCalls.filter((c: any) => typeof c[0] === 'string' && c[0].startsWith('homeassistant/sensor/'));
+        expect(discoveryCalls.length).toBeGreaterThan(0);
+
+        // find a discovery payload that includes VehicleMovement mapping (from driveway_motion prompt)
+        const vehicleDiscovery = discoveryCalls.find((c: any) => String(c[1]).includes('VehicleMovement'));
+        expect(vehicleDiscovery).toBeDefined();
+
+        const payload = JSON.parse(vehicleDiscovery[1]);
+        // state_topic should point to the task's OUTPUT subtopic (sanitized)
+        expect(payload.state_topic).toBe(`${config.mqtt.basetopic}/OUTPUT/gate/security`);
+        // value_template should reference the top-level VehicleMovement field
+        expect(payload.value_template).toMatch(/value_json\.VehicleMovement/);
+
+    });
+
+    test('HA discovery maps structured output types to HA entity domains', async () => {
+        // create a temporary task with various output types
+        if (!config.tasks) config.tasks = {} as any;
+        config.tasks['ha_type_test'] = {
+            topic: 'ha/test',
+            ha: true,
+            prompt: {
+                output: {
+                    StringField: { type: 'string' },
+                    NumberField: { type: 'number' },
+                    IntegerField: { type: 'integer' },
+                    BooleanField: { type: 'boolean' },
+                    ArrayField: { type: 'array', items: { type: 'string' } },
+                    EnumField: { type: 'string', enum: ['A','B'] },
+                    ObjectField: { type: 'object', properties: { Value: { type: 'string' } } }
+                }
+            }
+        } as any;
+
+        (mqttService.publish as jest.Mock).mockClear();
+        await (await import('../src/app')).publishHaDiscovery();
+
+        const calls = (mqttService.publish as jest.Mock).mock.calls;
+        const domains: Record<string, string> = {};
+        for (const c of calls) {
+            const topic: string = c[0];
+            if (!topic.startsWith('homeassistant/')) continue;
+            const body = JSON.parse(c[1]);
+            const name = body.name as string;
+            const prop = name.split(' ')[1];
+            const domain = topic.split('/')[1];
+            domains[prop] = domain;
+        }
+
+        expect(domains.StringField).toBe('text');
+        expect(domains.NumberField).toBe('number');
+        expect(domains.IntegerField).toBe('number');
+        expect(domains.BooleanField).toBe('binary_sensor');
+        expect(domains.ArrayField).toBe('sensor');
+        expect(domains.EnumField).toBe('sensor');
+        expect(domains.ObjectField).toBe('sensor');
+
+        // Enum discovery should include options in the payload
+        const enumDiscovery = calls.find((c: any) => String(c[1]).includes('EnumField'));
+        expect(enumDiscovery).toBeDefined();
+        const enumPayload = JSON.parse(enumDiscovery[1]);
+        expect(enumPayload.options).toEqual(expect.arrayContaining(['A','B']));
+    });
+
     test('status updates are emitted for camera loader and output published to sanitized topic', async () => {
         (aiService.sendFilesAndPrompt as jest.Mock).mockResolvedValue({ choices: [{ message: { content: 'OK' } }] });
 

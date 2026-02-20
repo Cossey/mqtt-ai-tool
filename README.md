@@ -330,6 +330,44 @@ This feature is useful for organizing multiple concurrent workflows or separatin
 
 Example: chaining `["status","status-driveway"]` will produce a merged `response_format` containing the timestamp/summary fields from `status` plus the driveway-specific observables from `status-driveway`; if both templates define the same observable, the `status-driveway` definition (rightmost) takes precedence.
 
+### Home Assistant / OpenHAB MQTT discovery
+
+- You can automatically expose task outputs to Home Assistant (and OpenHAB which supports the same discovery format) using MQTT discovery.
+- Configuration:
+  - `mqtt.homeassistant` (optional, default: `homeassistant`) — discovery prefix/topic.
+  - `task.ha` (optional, default: `false`) — opt-in per task to publish discovery entries.
+- Behavior:
+  - When the MQTT client connects the app will publish Home Assistant discovery messages for every task with `ha: true`.
+  - Discovery messages are published retained under `<mqtt.homeassistant>/<entity_domain>/<object_id>/config` so Home Assistant/OpenHAB can auto-discover entities.
+  - Each discovered entity uses `state_topic` = `<basetopic>/OUTPUT/<task.topic>` (sanitized). If the output property is an object (Value/Confidence/BestGuess/Reasoning), the entity's `value_template` extracts `.Value` and the full object is available via `json_attributes_topic`.
+- How detection works: the discovery generator reads the merged `response_format` (templates + task `prompt.output`) and exposes top-level keys as appropriate HA entities based on output type.
+
+Supported mappings (structured output → Home Assistant discovery domain):
+
+- String  → `text`
+- Number  → `number`
+- Integer → `number`
+- Boolean → `binary_sensor` (maps Yes/No/true/false → ON/OFF)
+- Array   → `sensor` (state = length; full array in attributes)
+- Enum    → `sensor` (discovery includes `options`)
+- Object  → `sensor` (state = `.Value`, full object in attributes)
+
+Example (enable discovery for a task):
+
+```yaml
+mqtt:
+  homeassistant: homeassistant
+
+tasks:
+  status-driveway:
+    ha: true
+    topic: status/driveway
+    prompt:
+      template: ["status", "status-driveway"]
+```
+
+- Discovery is published automatically on MQTT connect; you can also call the exported `publishHaDiscovery()` function to re-publish discovery at runtime.
+
 
 
 ### Progress Status Values

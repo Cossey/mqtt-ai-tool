@@ -15,6 +15,145 @@ export const statusService = new StatusService();
 // Track the current processing topic (sanitized) for PROGRESS and STATS routing
 let currentProcessingTopic: string | null = null;
 
+// Helper: sanitize names for Home Assistant object_id / unique_id
+function sanitizeEntityId(s: string): string {
+    return String(s || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9_]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+/**
+ * Publish Home Assistant MQTT discovery entries for all tasks with `ha: true` in config.
+ * - Uses `mqtt.homeassistant` as discovery prefix (defaults to 'homeassistant')
+ * - Exposes each top-level output property as a sensor whose state_topic is the task's OUTPUT topic
+ */
+export function publishHaDiscovery() {
+    const haPrefix = config.mqtt.homeassistant || 'homeassistant';
+    if (!config.tasks || Object.keys(config.tasks).length === 0) return;
+
+    for (const [taskName, task] of Object.entries(config.tasks)) {
+        if (!task || !task.prompt) continue;
+        if (!task.ha) continue; // feature opt-in per-task
+
+        // compute the OUTPUT state topic for this task (use task.topic if present)
+        let stateTopic = `${config.mqtt.basetopic}/OUTPUT`;
+        if (task.topic && typeof task.topic === 'string') {
+            const sanitized = sanitizeTopic(task.topic);
+            if (sanitized) stateTopic = `${config.mqtt.basetopic}/OUTPUT/${sanitized}`;
+        }
+
+        // Collect output properties from template chain (merged) and from task.prompt.output (task-level shorthand)
+        const properties: Record<string, any> = {};
+
+        // 1) Templates
+        if (task.prompt.template) {
+            const res = composeTemplateChain(task.prompt.template as any, config.prompts);
+            const rf = res.response_format;
+            if (rf && rf.type === 'json_schema' && rf.json_schema && rf.json_schema.schema && rf.json_schema.schema.properties) {
+                Object.assign(properties, rf.json_schema.schema.properties);
+            }
+        }
+
+        // 2) Task-level `prompt.output` (old shorthand) overrides/extends template props
+        if ((task.prompt as any).output && typeof (task.prompt as any).output === 'object') {
+            const built = buildJsonSchemaUtil((task.prompt as any).output);
+            Object.assign(properties, built);
+        }
+
+        if (Object.keys(properties).length === 0) continue;
+
+        // Publish discovery for each top-level property
+        for (const [propName, propSchema] of Object.entries(properties)) {
+            const objectId = sanitizeEntityId(`${taskName}_${propName}`);
+
+            // determine HA domain & value_template based on schema type
+            let domain = 'sensor';
+            let valueTemplate = `{{ value_json.${propName} }}`;
+            let payloadExtras: Record<string, any> = {};
+
+            const isObjectWrapper = propSchema && propSchema.type === 'object' && propSchema.properties && propSchema.properties.Value;
+
+            const schemaType = (() => {
+                if (!propSchema) return 'string';
+                if (propSchema.enum && Array.isArray(propSchema.enum)) return 'enum';
+                if (propSchema.type) return propSchema.type;
+                // default
+                return 'string';
+            })();
+
+            switch (schemaType) {
+                case 'boolean':
+                    domain = 'binary_sensor';
+                    if (isObjectWrapper) {
+                        // Value is 'Yes'/'No' or boolean; map to ON/OFF
+                        valueTemplate = `{% if value_json.${propName}.Value == true or value_json.${propName}.Value == 'Yes' %}ON{% elif value_json.${propName}.Value == 'No' or value_json.${propName}.Value == false %}OFF{% else %}UNKNOWN{% endif %}`;
+                    } else {
+                        valueTemplate = `{% if value_json.${propName} == true or value_json.${propName} == 'Yes' %}ON{% elif value_json.${propName} == 'No' or value_json.${propName} == false %}OFF{% else %}UNKNOWN{% endif %}`;
+                    }
+                    payloadExtras.payload_on = 'ON';
+                    payloadExtras.payload_off = 'OFF';
+                    break;
+                case 'integer':
+                case 'number':
+                    // Map numeric outputs to Home Assistant `number` entity
+                    domain = 'number';
+                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value }}` : `{{ value_json.${propName} }}`;
+                    break;
+                case 'array':
+                    domain = 'sensor';
+                    // expose full array as JSON in attributes, and use length as state
+                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value | length }}` : `{{ value_json.${propName} | length }}`;
+                    payloadExtras.json_attributes = true;
+                    break;
+                case 'enum':
+                    domain = 'sensor';
+                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value }}` : `{{ value_json.${propName} }}`;
+                    // publish available options as metadata for UIs
+                    payloadExtras.options = propSchema.enum;
+                    break;
+                case 'object':
+                    domain = 'sensor';
+                    // default state is the inner Value if present, otherwise JSON string
+                    if (isObjectWrapper) {
+                        valueTemplate = `{{ value_json.${propName}.Value }}`;
+                        payloadExtras.json_attributes = true;
+                    } else {
+                        valueTemplate = `{{ value_json.${propName} }}`;
+                        payloadExtras.json_attributes = true;
+                    }
+                    break;
+                case 'string':
+                default:
+                    // Map string outputs to Home Assistant `text` entity
+                    domain = 'text';
+                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value }}` : `{{ value_json.${propName} }}`;
+                    break;
+            }
+
+            const discoveryTopic = `${haPrefix}/${domain}/${objectId}/config`;
+
+            const payload: any = {
+                name: `${taskName} ${propName}`,
+                unique_id: `mqtt-ai-tool_${taskName}_${propName}`,
+                state_topic: stateTopic,
+                value_template: valueTemplate,
+                availability_topic: `${config.mqtt.basetopic}/ONLINE`,
+                device: {
+                    identifiers: [`mqtt-ai-tool_${taskName}`],
+                    name: `mqtt-ai-tool ${taskName}`,
+                },
+                // keep the full OUTPUT JSON available to HA as attributes
+                json_attributes_topic: stateTopic,
+                ...payloadExtras,
+            };
+
+            mqttService.publish(discoveryTopic, JSON.stringify(payload), true);
+        }
+    }
+}
+
+
 // Wire up status service events to MQTT publishing
 statusService.on('statusUpdate', (cameraName: string | undefined, status: string) => {
     mqttService.publishProgress(cameraName, status, currentProcessingTopic);
@@ -35,6 +174,13 @@ async function initialize() {
         mqttService.on('connected', () => {
             logger.info('MQTT connection established, initializing channels...');
             mqttService.initializeChannels(config.cameras);
+            // Publish Home Assistant discovery entries for tasks with ha:true
+            try {
+                publishHaDiscovery();
+                logger.info('Published Home Assistant MQTT discovery entries');
+            } catch (e) {
+                logger.warn(`Failed to publish HA discovery: ${e}`);
+            }
         });
 
         mqttService.on('input', (payload: any) => {

@@ -6,6 +6,7 @@ export interface MqttConfig {
     password?: string;
     password_file?: string;
     client?: string;
+    homeassistant?: string; // Home Assistant discovery prefix (optional)
 }
 
 export interface AiConfig {
@@ -70,6 +71,7 @@ export interface DatabaseConfig {
 export interface TaskConfig {
     ai?: string; // AI backend to use
     topic?: string; // Optional topic routing
+    ha?: boolean; // expose outputs to Home Assistant discovery (optional, default false)
     prompt: {
         template?: string | string[]; // Prompt template name(s)
         text?: string; // Inline prompt text
