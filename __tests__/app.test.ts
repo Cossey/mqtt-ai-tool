@@ -175,13 +175,73 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(domains.BooleanField).toBe('binary_sensor');
         expect(domains.ArrayField).toBe('sensor');
         expect(domains.EnumField).toBe('sensor');
-        expect(domains.ObjectField).toBe('sensor');
+        // Object fields are NOT published as a single entity; their child properties are published instead
+        expect(domains.ObjectField).toBeUndefined();
+        expect(domains['ObjectField.Value']).toBe('text');
 
         // Enum discovery should include options in the payload
         const enumDiscovery = calls.find((c: any) => String(c[1]).includes('EnumField'));
         expect(enumDiscovery).toBeDefined();
         const enumPayload = JSON.parse(enumDiscovery[1]);
         expect(enumPayload.options).toEqual(expect.arrayContaining(['A','B']));
+    });
+
+    test('HA discovery exposes object sub-fields (Value/Confidence/BestGuess/Reasoning)', async () => {
+        if (!config.tasks) config.tasks = {} as any;
+        config.tasks['ha_object_subfields'] = {
+            topic: 'ha/subfields',
+            ha: true,
+            prompt: {
+                output: {
+                    PackageInfo: {
+                        type: 'object',
+                        properties: {
+                            Value: { type: 'string', enum: ['Yes','No','Unknown'] },
+                            Confidence: { type: 'number' },
+                            BestGuess: { type: 'string' },
+                            Reasoning: { type: 'string' }
+                        }
+                    }
+                }
+            }
+        } as any;
+
+        (mqttService.publish as jest.Mock).mockClear();
+        await (await import('../src/app')).publishHaDiscovery();
+
+        const calls = (mqttService.publish as jest.Mock).mock.calls.filter((c: any) => typeof c[0] === 'string' && c[0].startsWith('homeassistant/'));
+
+        // object wrapper itself should NOT be published; its children should be
+        const mainWrapper = calls.find((c: any) => c[0] === 'homeassistant/sensor/ha_object_subfields_packageinfo/config');
+        expect(mainWrapper).toBeUndefined();
+
+        // Value sub-field -> text domain (published at path PackageInfo.Value)
+        const val = calls.find((c: any) => String(c[1]).includes('PackageInfo.Value'));
+        expect(val).toBeDefined();
+        const valPayload = JSON.parse(val[1]);
+        expect(valPayload.name).toContain('PackageInfo.Value');
+        expect(valPayload.value_template).toMatch(/value_json\.PackageInfo\.Value/);
+
+        // Confidence sub-field -> number domain
+        const conf = calls.find((c: any) => String(c[1]).includes('PackageInfo.Confidence'));
+        expect(conf).toBeDefined();
+        const confPayload = JSON.parse(conf[1]);
+        expect(confPayload.name).toContain('PackageInfo.Confidence');
+        expect(confPayload.value_template).toMatch(/value_json\.PackageInfo\.Confidence/);
+
+        // BestGuess sub-field -> text domain
+        const bg = calls.find((c: any) => String(c[1]).includes('PackageInfo.BestGuess'));
+        expect(bg).toBeDefined();
+        const bgPayload = JSON.parse(bg[1]);
+        expect(bgPayload.name).toContain('PackageInfo.BestGuess');
+        expect(bgPayload.value_template).toMatch(/value_json\.PackageInfo\.BestGuess/);
+
+        // Reasoning sub-field -> text domain
+        const rs = calls.find((c: any) => String(c[1]).includes('PackageInfo.Reasoning'));
+        expect(rs).toBeDefined();
+        const rsPayload = JSON.parse(rs[1]);
+        expect(rsPayload.name).toContain('PackageInfo.Reasoning');
+        expect(rsPayload.value_template).toMatch(/value_json\.PackageInfo\.Reasoning/);
     });
 
     test('status updates are emitted for camera loader and output published to sanitized topic', async () => {

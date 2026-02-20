@@ -339,7 +339,7 @@ Example: chaining `["status","status-driveway"]` will produce a merged `response
 - Behavior:
   - When the MQTT client connects the app will publish Home Assistant discovery messages for every task with `ha: true`.
   - Discovery messages are published retained under `<mqtt.homeassistant>/<entity_domain>/<object_id>/config` so Home Assistant/OpenHAB can auto-discover entities.
-  - Each discovered entity uses `state_topic` = `<basetopic>/OUTPUT/<task.topic>` (sanitized). If the output property is an object (Value/Confidence/BestGuess/Reasoning), the entity's `value_template` extracts `.Value` and the full object is available via `json_attributes_topic`.
+  - Each discovered entity uses `state_topic` = `<basetopic>/OUTPUT/<task.topic>` (sanitized). For `object`-typed outputs we do **not** publish the object itself as a single HA entity; instead each child property is published as its own entity using dotted names (for example: `<Task> <Property>.Value`, `<Task> <Property>.Confidence`, `<Task> <Property>.BestGuess`). The `Value` child will be mapped according to its declared type and the full object remains available in `json_attributes_topic`.
 - How detection works: the discovery generator reads the merged `response_format` (templates + task `prompt.output`) and exposes top-level keys as appropriate HA entities based on output type.
 
 Supported mappings (structured output → Home Assistant discovery domain):

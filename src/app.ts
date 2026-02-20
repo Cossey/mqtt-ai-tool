@@ -63,79 +63,81 @@ export function publishHaDiscovery() {
 
         if (Object.keys(properties).length === 0) continue;
 
-        // Publish discovery for each top-level property
-        for (const [propName, propSchema] of Object.entries(properties)) {
-            const objectId = sanitizeEntityId(`${taskName}_${propName}`);
+        // Publish discovery for each top-level property (recursively traverse nested schemas)
+        // Helper: safe identifier for dot vs bracket JSON access
+        const isSafeIdentifier = (n: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(n));
+        const jsonPathFromSegments = (segments: string[]) => {
+            let p = 'value_json';
+            for (const s of segments) {
+                if (isSafeIdentifier(s)) p += `.${s}`;
+                else p += `['${String(s).replace(/'/g, "\\'")}']`;
+            }
+            return p;
+        };
 
-            // determine HA domain & value_template based on schema type
+        const publishEntityForPath = (pathSegments: string[], nodeSchema: any) => {
+            const displayName = `${taskName} ${pathSegments.join('.')}`;
+            const objectId = sanitizeEntityId(`${taskName}_${pathSegments.join('_')}`);
+            const uniqueId = `mqtt-ai-tool_${taskName}_${pathSegments.join('_')}`;
+            const baseJson = jsonPathFromSegments(pathSegments);
+
+            // Decide if this node is an object-wrapper (has a Value property)
+            const isWrapper = nodeSchema && nodeSchema.type === 'object' && nodeSchema.properties && nodeSchema.properties.Value;
+
+            // Figure out the type we should map to HA domain from (wrapper.Value OR the node itself)
+            const effectiveSchema = isWrapper ? nodeSchema.properties.Value : nodeSchema;
+            const effectiveType = (effectiveSchema && effectiveSchema.enum && Array.isArray(effectiveSchema.enum)) ? 'enum' : (effectiveSchema && effectiveSchema.type) || 'string';
+
             let domain = 'sensor';
-            let valueTemplate = `{{ value_json.${propName} }}`;
-            let payloadExtras: Record<string, any> = {};
+            let valueTemplate = `{{ ${isWrapper ? `${baseJson}.Value` : baseJson} }}`;
+            const extras: any = {};
 
-            const isObjectWrapper = propSchema && propSchema.type === 'object' && propSchema.properties && propSchema.properties.Value;
-
-            const schemaType = (() => {
-                if (!propSchema) return 'string';
-                if (propSchema.enum && Array.isArray(propSchema.enum)) return 'enum';
-                if (propSchema.type) return propSchema.type;
-                // default
-                return 'string';
-            })();
-
-            switch (schemaType) {
+            // Preserve previous behaviour: if the schema node itself is declared as an object,
+            // map it to a `sensor` by default (and expose attributes). Otherwise infer from the effective type.
+            if (nodeSchema && (nodeSchema as any).type === 'object') {
+                domain = 'sensor';
+                extras.json_attributes = true;
+                valueTemplate = isWrapper ? `{{ ${baseJson}.Value }}` : `{{ ${baseJson} }}`;
+            } else {
+                switch (effectiveType) {
                 case 'boolean':
                     domain = 'binary_sensor';
-                    if (isObjectWrapper) {
-                        // Value is 'Yes'/'No' or boolean; map to ON/OFF
-                        valueTemplate = `{% if value_json.${propName}.Value == true or value_json.${propName}.Value == 'Yes' %}ON{% elif value_json.${propName}.Value == 'No' or value_json.${propName}.Value == false %}OFF{% else %}UNKNOWN{% endif %}`;
-                    } else {
-                        valueTemplate = `{% if value_json.${propName} == true or value_json.${propName} == 'Yes' %}ON{% elif value_json.${propName} == 'No' or value_json.${propName} == false %}OFF{% else %}UNKNOWN{% endif %}`;
-                    }
-                    payloadExtras.payload_on = 'ON';
-                    payloadExtras.payload_off = 'OFF';
+                    valueTemplate = isWrapper
+                        ? `{% if ${baseJson}.Value == true or ${baseJson}.Value == 'Yes' %}ON{% elif ${baseJson}.Value == 'No' or ${baseJson}.Value == false %}OFF{% else %}UNKNOWN{% endif %}`
+                        : `{% if ${baseJson} == true or ${baseJson} == 'Yes' %}ON{% elif ${baseJson} == 'No' or ${baseJson} == false %}OFF{% else %}UNKNOWN{% endif %}`;
+                    extras.payload_on = 'ON';
+                    extras.payload_off = 'OFF';
                     break;
                 case 'integer':
                 case 'number':
-                    // Map numeric outputs to Home Assistant `number` entity
                     domain = 'number';
-                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value }}` : `{{ value_json.${propName} }}`;
                     break;
                 case 'array':
                     domain = 'sensor';
-                    // expose full array as JSON in attributes, and use length as state
-                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value | length }}` : `{{ value_json.${propName} | length }}`;
-                    payloadExtras.json_attributes = true;
+                    // use length as state, keep array in attributes
+                    valueTemplate = isWrapper ? `{{ ${baseJson}.Value | length }}` : `{{ ${baseJson} | length }}`;
+                    extras.json_attributes = true;
                     break;
                 case 'enum':
                     domain = 'sensor';
-                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value }}` : `{{ value_json.${propName} }}`;
-                    // publish available options as metadata for UIs
-                    payloadExtras.options = propSchema.enum;
+                    extras.options = (effectiveSchema as any).enum;
                     break;
                 case 'object':
                     domain = 'sensor';
-                    // default state is the inner Value if present, otherwise JSON string
-                    if (isObjectWrapper) {
-                        valueTemplate = `{{ value_json.${propName}.Value }}`;
-                        payloadExtras.json_attributes = true;
-                    } else {
-                        valueTemplate = `{{ value_json.${propName} }}`;
-                        payloadExtras.json_attributes = true;
-                    }
+                    extras.json_attributes = true;
+                    valueTemplate = isWrapper ? `{{ ${baseJson}.Value }}` : `{{ ${baseJson} }}`;
                     break;
                 case 'string':
                 default:
-                    // Map string outputs to Home Assistant `text` entity
                     domain = 'text';
-                    valueTemplate = isObjectWrapper ? `{{ value_json.${propName}.Value }}` : `{{ value_json.${propName} }}`;
                     break;
+                }
             }
 
             const discoveryTopic = `${haPrefix}/${domain}/${objectId}/config`;
-
             const payload: any = {
-                name: `${taskName} ${propName}`,
-                unique_id: `mqtt-ai-tool_${taskName}_${propName}`,
+                name: displayName,
+                unique_id: uniqueId,
                 state_topic: stateTopic,
                 value_template: valueTemplate,
                 availability_topic: `${config.mqtt.basetopic}/ONLINE`,
@@ -143,12 +145,50 @@ export function publishHaDiscovery() {
                     identifiers: [`mqtt-ai-tool_${taskName}`],
                     name: `mqtt-ai-tool ${taskName}`,
                 },
-                // keep the full OUTPUT JSON available to HA as attributes
                 json_attributes_topic: stateTopic,
-                ...payloadExtras,
+                ...extras,
             };
 
             mqttService.publish(discoveryTopic, JSON.stringify(payload), true);
+
+            // If wrapper, expose common nested fields as separate entities as well
+            if (isWrapper) {
+                const subFields = ['Confidence', 'BestGuess', 'Reasoning'];
+                for (const sf of subFields) {
+                    if (nodeSchema.properties[sf]) {
+                        const subPath = pathSegments.concat(sf);
+                        publishEntityForPath(subPath, nodeSchema.properties[sf]);
+                    }
+                }
+            }
+        };
+
+        const traverseSchema = (pathSegments: string[], schemaNode: any) => {
+            if (!schemaNode) return;
+            // If node is an object and contains a Value field, treat it as an observable wrapper and publish it
+            if (schemaNode.type === 'object' && schemaNode.properties) {
+                // If this object is a canonical wrapper (has a Value child) we DO NOT publish the object itself.
+                // Instead expose each child property under the dotted path (e.g. Property.Value, Property.Confidence).
+                if (schemaNode.properties.Value) {
+                    for (const [childName, childSchema] of Object.entries(schemaNode.properties)) {
+                        traverseSchema(pathSegments.concat(childName), childSchema);
+                    }
+                    return;
+                }
+
+                // Non-wrapper object: recurse into child properties (do not publish the parent object itself)
+                for (const [childName, childSchema] of Object.entries(schemaNode.properties)) {
+                    traverseSchema(pathSegments.concat(childName), childSchema);
+                }
+                return;
+            }
+
+            // Primitive / enum / array leaf — publish directly
+            publishEntityForPath(pathSegments, schemaNode);
+        };
+
+        for (const [propName, propSchema] of Object.entries(properties)) {
+            traverseSchema([propName], propSchema as any);
         }
     }
 }
