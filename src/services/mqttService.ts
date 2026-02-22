@@ -220,7 +220,7 @@ export class MqttService extends EventEmitter {
     public publish(topic: string, message: string, retain: boolean = false) {
         if (this.client && this.client.connected) {
             logger.info(`Publishing to "${topic}": "${message}"${retain ? ' (retained)' : ''}`);
-            this.client.publish(topic, message, { retain }, (err) => {
+            this.client.publish(topic, message, { retain: retain }, (err) => {
                 if (err) {
                     logger.error(`Failed to publish to ${topic}: ${err.message}`);
                 } else {
