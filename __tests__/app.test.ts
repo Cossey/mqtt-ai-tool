@@ -187,13 +187,13 @@ describe('processPayload integration tests (mocked services)', () => {
             const topic: string = c[0];
             if (!topic.startsWith('homeassistant/')) continue;
             const body = JSON.parse(c[1]);
-            const name = body.name as string;
-            const prop = name.split(' ')[1];
+            // displayName is now just pathSegments.join('.') with no task prefix
+            const prop = body.name as string;
             const domain = topic.split('/')[1];
             domains[prop] = domain;
         }
 
-        expect(domains.StringField).toBe('text');
+        expect(domains.StringField).toBe('sensor');
         expect(domains.NumberField).toBe('sensor');
         expect(domains.IntegerField).toBe('sensor');
         expect(domains.BooleanField).toBe('binary_sensor');
@@ -201,7 +201,7 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(domains.EnumField).toBe('sensor');
         // Object fields are NOT published as a single entity; their child properties are published instead
         expect(domains.ObjectField).toBeUndefined();
-        expect(domains['ObjectField.Value']).toBe('text');
+        expect(domains['ObjectField.Value']).toBe('sensor');
 
         // Enum discovery should include options in the payload and proper device_class
         const enumDiscovery = calls.find((c: any) => String(c[1]).includes('EnumField'));
@@ -237,7 +237,8 @@ describe('processPayload integration tests (mocked services)', () => {
         const calls = (mqttService.publish as jest.Mock).mock.calls.filter((c: any) => typeof c[0] === 'string' && c[0].startsWith('homeassistant/'));
 
         // object wrapper itself should NOT be published; its children should be
-        const mainWrapper = calls.find((c: any) => c[0] === 'homeassistant/sensor/ha_object_subfields_packageinfo/config');
+        // new topic format: haPrefix/domain/sanitizedTaskName/objectId/config
+        const mainWrapper = calls.find((c: any) => c[0] === 'homeassistant/sensor/ha_object_subfields/packageinfo/config');
         expect(mainWrapper).toBeUndefined();
 
         // Value sub-field -> text domain (published at path PackageInfo.Value)

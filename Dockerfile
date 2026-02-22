@@ -1,5 +1,5 @@
 # Builder stage: install dev dependencies and build
-FROM node:22 AS builder
+FROM node:22-alpine AS builder
 WORKDIR /usr/src/app
 
 # Copy package files and install all dependencies (including dev deps for build)
@@ -14,15 +14,15 @@ RUN npm run build
 # Runtime stage: minimal image with only production deps and ffmpeg
 FROM node:22-slim AS runtime
 
-# Install ffmpeg and certificates with minimal packages
+ENV NODE_ENV=production
+
+# Install ffmpeg, certificates, and create non-root user in a single layer
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --user-group --create-home --shell /bin/false appuser
 
 WORKDIR /usr/src/app
-
-# Create a non-root user to run the app
-RUN useradd --user-group --create-home --shell /bin/false appuser || true
 
 # Copy package files and install only production deps
 COPY package*.json ./
@@ -36,7 +36,5 @@ RUN mkdir -p /usr/src/app/tmp && chown -R appuser:appuser /usr/src/app
 
 # Use non-root user
 USER appuser
-
-EXPOSE 3000
 
 CMD ["node", "dist/app.js"]

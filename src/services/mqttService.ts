@@ -235,7 +235,7 @@ export class MqttService extends EventEmitter {
     public publishBinary(topic: string, data: Buffer, retain: boolean = false) {
         if (this.client && this.client.connected) {
             logger.info(`Publishing binary data to "${topic}": ${data.length} bytes${retain ? ' (retained)' : ''}`);
-            this.client.publish(topic, data, { retain }, (err) => {
+            this.client.publish(topic, data, { retain: retain }, (err) => {
                 if (err) {
                     logger.error(`Failed to publish binary data to ${topic}: ${err.message}`);
                 } else {

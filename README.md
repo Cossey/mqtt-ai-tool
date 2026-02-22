@@ -339,18 +339,20 @@ Example: chaining `["status","status-driveway"]` will produce a merged `response
 - Behavior:
   - When the MQTT client connects the app will publish Home Assistant discovery messages for every task with `ha: true`.
   - Discovery messages are published retained under `<mqtt.homeassistant>/<entity_domain>/<object_id>/config` so Home Assistant/OpenHAB can auto-discover entities.
-  - Each discovered entity uses `state_topic` = `<basetopic>/OUTPUT/<task.topic>` (sanitized). For `object`-typed outputs we do **not** publish the object itself as a single HA entity; instead each child property is published as its own entity using dotted names (for example: `<Task> <Property>.Value`, `<Task> <Property>.Confidence`, `<Task> <Property>.BestGuess`). The `Value` child will be mapped according to its declared type and the full object remains available in `json_attributes_topic`.
+  - Each discovered entity uses `state_topic` = `<basetopic>/OUTPUT/<task.topic>` (sanitized). For `object`-typed outputs we do **not** publish the object itself as a single HA entity; instead each child property is published as its own entity using dotted names (for example: `<Property>.Value`, `<Property>.Confidence`, `<Property>.BestGuess`). The `Value` child will be mapped according to its declared type.
+  - Discovery topics follow the format: `<haPrefix>/<domain>/<sanitizedTaskName>/<objectId>/config`
+  - Each entity includes an `availability` block pointing to `<basetopic>/ONLINE` with `payload_available: YES` and `payload_not_available: NO`, matching the service's LWT status topic.
 - How detection works: the discovery generator reads the merged `response_format` (templates + task `prompt.output`) and exposes top-level keys as appropriate HA entities based on output type.
 
 Supported mappings (structured output → Home Assistant discovery domain):
 
-- String  → `text`
-- Number  → `number`
-- Integer → `number`
+- String  → `sensor`
+- Number  → `sensor` (with `state_class: measurement`)
+- Integer → `sensor` (with `state_class: measurement`)
 - Boolean → `binary_sensor` (maps Yes/No/true/false → ON/OFF)
-- Array   → `sensor` (state = length; full array in attributes)
-- Enum    → `sensor` (discovery includes `options`)
-- Object  → `sensor` (state = `.Value`, full object in attributes)
+- Array   → `sensor` (state = length; `state_class: measurement`)
+- Enum    → `sensor` (discovery includes `options` and `device_class: enum`)
+- Object  → not published directly; child properties are each published as their own entity
 
 Example (enable discovery for a task):
 
@@ -831,6 +833,7 @@ Processing with AI
 - `token`: API authentication token (or use `token_file` for Docker secrets)
 - `type`: Backend type (e.g., `openai`)
 - `model`: Default AI model name (must support vision/image input for camera loaders)
+- `max_tokens`: Maximum tokens for AI response (default: `4096`)
 
 ### Camera Settings
 
@@ -873,10 +876,6 @@ Task templates combine prompts with loaders and other settings to create reusabl
   - `model`: (optional) Model override
 - `files`: (optional) Array of file paths to attach
 - `loader`: (optional) Array of loader configurations
-
-Tasks are referenced in INPUT using `{"task": "task_name"}` and can have fields overridden by the INPUT payload.
-  - `files`: (optional) Array of file paths to attach
-  - `loader`: (optional) Array of loader configurations
 
 Tasks are referenced in INPUT using `{"task": "task_name"}` and can have fields overridden by the INPUT payload.
 

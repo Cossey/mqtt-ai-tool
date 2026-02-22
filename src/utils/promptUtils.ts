@@ -122,7 +122,7 @@ function mergeProperties(left: Record<string, any> | undefined, right: Record<st
     const out: Record<string, any> = {};
     if (left) {
         for (const [k, v] of Object.entries(left)) {
-            out[k] = JSON.parse(JSON.stringify(v));
+            out[k] = structuredClone(v);
         }
     }
     if (right) {
@@ -138,7 +138,7 @@ function mergeProperties(left: Record<string, any> | undefined, right: Record<st
                 if (v.additionalProperties !== undefined) out[k].additionalProperties = v.additionalProperties;
             } else {
                 // right side overrides entirely for non-object or conflicting types
-                out[k] = JSON.parse(JSON.stringify(v));
+                out[k] = structuredClone(v);
             }
         }
     }
@@ -179,14 +179,13 @@ function mergeJsonSchema(left: any, right: any): any {
 // Merge multiple response_format objects (supports json_schema merging). Rightmost definitions take precedence for duplicates.
 function mergeResponseFormats(formats: any[]): any {
     if (!formats || formats.length === 0) return undefined;
-    if (formats.length === 1) return JSON.parse(JSON.stringify(formats[0]));
+    if (formats.length === 1) return structuredClone(formats[0]);
 
     // Start from the left and fold-right with last-wins semantics for conflicts
-    let acc = JSON.parse(JSON.stringify(formats[0]));
+    let acc = structuredClone(formats[0]);
     for (let i = 1; i < formats.length; i++) {
         const next = formats[i];
         if (acc.type === 'json_schema' && next.type === 'json_schema') {
-            acc = JSON.parse(JSON.stringify(acc));
             acc.json_schema = acc.json_schema || {};
             acc.json_schema.schema = mergeJsonSchema(acc.json_schema.schema || {}, next.json_schema.schema || {});
             // prefer the rightmost name/strict if present
@@ -194,7 +193,7 @@ function mergeResponseFormats(formats: any[]): any {
             acc.json_schema.strict = next.json_schema?.strict !== undefined ? next.json_schema.strict : acc.json_schema.strict;
         } else {
             // fallback: types differ or unsupported - last wins
-            acc = JSON.parse(JSON.stringify(next));
+            acc = structuredClone(next);
         }
     }
 

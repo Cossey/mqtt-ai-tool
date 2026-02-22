@@ -15,6 +15,7 @@ export interface AiConfig {
     token_file?: string; // optional path to load token from file (e.g., Docker secret)
     type?: string; // e.g., 'openai'
     model?: string; // default model for this AI backend
+    max_tokens?: number; // maximum tokens for AI response (default: 4096)
 }
 
 export interface JsonSchemaProperty {

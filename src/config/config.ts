@@ -3,6 +3,7 @@ import path from 'path';
 import yaml from 'js-yaml';
 import { Config } from '../types';
 import { logger } from '../utils/logger';
+import { buildJsonSchema } from '../utils/promptUtils';
 
 // Add sanitization helper
 const sanitizeConfig = (config: Config): any => {
@@ -263,33 +264,6 @@ function processPromptsConfig(config: Config) {
             logger.debug(`Task ${taskName} validated successfully`);
         }
     }
-}
-
-function buildJsonSchema(properties: any): any {
-    return Object.fromEntries(
-        Object.entries(properties).map(([key, prop]: [string, any]) => [
-            key,
-            {
-                ...prop,
-                ...(prop.type === 'object' &&
-                    prop.properties && {
-                        properties: buildJsonSchema(prop.properties),
-                        additionalProperties: false,
-                        required: Object.keys(prop.properties),
-                    }),
-                ...(prop.type === 'array' &&
-                    prop.items?.type === 'object' &&
-                    prop.items.properties && {
-                        items: {
-                            ...prop.items,
-                            properties: buildJsonSchema(prop.items.properties),
-                            additionalProperties: false,
-                            required: Object.keys(prop.items.properties),
-                        },
-                    }),
-            },
-        ])
-    );
 }
 
 function processDatabasesConfig(config: Config) {

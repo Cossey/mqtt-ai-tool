@@ -105,7 +105,7 @@ export class AiService {
                     content,
                 },
             ],
-            max_tokens: 300,
+            max_tokens: backend.max_tokens ?? 4096,
         };
 
         if (responseFormat) {

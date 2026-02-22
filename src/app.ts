@@ -24,6 +24,17 @@ function sanitizeEntityId(s: string): string {
         .replace(/^_+|_+$/g, '');
 }
 
+// Module-level helpers for HA discovery JSON path building
+const isSafeIdentifier = (n: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(n));
+const jsonPathFromSegments = (segments: string[]): string => {
+    let p = 'value_json';
+    for (const s of segments) {
+        if (isSafeIdentifier(s)) p += `.${s}`;
+        else p += `['${String(s).replace(/'/g, "\\'")}']`;
+    }
+    return p;
+};
+
 /**
  * Publish Home Assistant MQTT discovery entries for all tasks with `ha: true` in config.
  * - Uses `mqtt.homeassistant` as discovery prefix (defaults to 'homeassistant')
@@ -65,16 +76,6 @@ export function publishHaDiscovery() {
         if (Object.keys(properties).length === 0) continue;
 
         // Publish discovery for each top-level property (recursively traverse nested schemas)
-        // Helper: safe identifier for dot vs bracket JSON access
-        const isSafeIdentifier = (n: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(n));
-        const jsonPathFromSegments = (segments: string[]) => {
-            let p = 'value_json';
-            for (const s of segments) {
-                if (isSafeIdentifier(s)) p += `.${s}`;
-                else p += `['${String(s).replace(/'/g, "\\'")}']`;
-            }
-            return p;
-        };
 
         const publishEntityForPath = (pathSegments: string[], nodeSchema: any) => {
             // displayName used by HA/OpenHAB; convert hyphens to underscores to avoid item-name issues
@@ -100,7 +101,6 @@ export function publishHaDiscovery() {
             // map it to a `sensor` by default (and expose attributes). Otherwise infer from the effective type.
             if (nodeSchema && (nodeSchema as any).type === 'object') {
                 domain = 'sensor';
-                extras.json_attributes = true;
                 valueTemplate = isWrapper ? `{{ ${baseJson}.Value }}` : `{{ ${baseJson} }}`;
             } else {
                 switch (effectiveType) {
@@ -122,7 +122,6 @@ export function publishHaDiscovery() {
                     domain = 'sensor';
                     // use length as state, keep array in attributes
                     valueTemplate = isWrapper ? `{{ ${baseJson}.Value | length }}` : `{{ ${baseJson} | length }}`;
-                    extras.json_attributes = true;
                     extras.state_class = 'measurement';
                     break;
                 case 'enum':
@@ -132,7 +131,6 @@ export function publishHaDiscovery() {
                     break;
                 case 'object':
                     domain = 'sensor';
-                    extras.json_attributes = true;
                     valueTemplate = isWrapper ? `{{ ${baseJson}.Value }}` : `{{ ${baseJson} }}`;
                     break;
                 case 'string':
@@ -142,7 +140,8 @@ export function publishHaDiscovery() {
                 }
             }
 
-            const discoveryTopic = `${haPrefix}/${domain}/${taskName}/${objectId}/config`;
+            const sanitizedTaskName = sanitizeEntityId(taskName).replace(/-/g, '_');
+            const discoveryTopic = `${haPrefix}/${domain}/${sanitizedTaskName}/${objectId}/config`;
             const payload: any = {
                 name: displayName,
                 unique_id: uniqueId,
@@ -316,7 +315,7 @@ export async function processPayload(payload: any) {
     // Sanitize and set the current processing topic for PROGRESS/STATS routing
     currentProcessingTopic = null;
     if (payload.topic && typeof payload.topic === 'string') {
-        const sanitized = sanitizeOutgoingTopic(payload.topic);
+        const sanitized = sanitizeTopic(payload.topic);
         if (sanitized) {
             currentProcessingTopic = sanitized;
             logger.debug(`Using topic "${sanitized}" for OUTPUT/PROGRESS/STATS routing`);
@@ -403,7 +402,7 @@ export async function processPayload(payload: any) {
                         strict: true,
                         schema: {
                             type: 'object',
-                            properties: buildJsonSchema(payload.prompt.output),
+                            properties: buildJsonSchemaUtil(payload.prompt.output),
                             additionalProperties: false,
                             required: Object.keys(payload.prompt.output || {}),
                         },
@@ -867,15 +866,6 @@ async function writeBufferToTemp(buf: Buffer, topic: string, mime?: string): Pro
     fs.writeFileSync(tmpPath, buf);
     return tmpPath;
 }
-function buildJsonSchema(properties: any): any { return buildJsonSchemaUtil(properties); }
-
-function sanitizeOutgoingTopic(t: string): string | null { return sanitizeTopic(t); }
-
-async function downloadUrlToTemp(url: string): Promise<string> {
-    const result = await downloadUrlToTempWithMetrics(url);
-    return result.tmpPath;
-}
-
 async function downloadUrlToTempWithMetrics(url: string): Promise<{ tmpPath: string; httpCode: number; fileSize: number }> {
     const axios = (await import('axios')).default;
     const os = await import('os');
