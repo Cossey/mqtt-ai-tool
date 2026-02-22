@@ -19,7 +19,8 @@ let currentProcessingTopic: string | null = null;
 function sanitizeEntityId(s: string): string {
     return String(s || '')
         .toLowerCase()
-        .replace(/[^a-z0-9_]+/g, '_')
+        // NOTE: hyphens are intentionally preserved here; they are allowed in object_id
+        .replace(/[^a-z0-9_\-]+/g, '_')
         .replace(/^_+|_+$/g, '');
 }
 
@@ -76,9 +77,12 @@ export function publishHaDiscovery() {
         };
 
         const publishEntityForPath = (pathSegments: string[], nodeSchema: any) => {
-            const displayName = `${taskName} ${pathSegments.join('.')}`;
-            const objectId = sanitizeEntityId(`${taskName}_${pathSegments.join('_')}`);
-            const uniqueId = `mqtt-ai-tool_${taskName}_${pathSegments.join('_')}`;
+            // displayName used by HA/OpenHAB; convert hyphens to underscores to avoid item-name issues
+            const displayName = `${pathSegments.join('.')}`;
+            // discovery objectId must not contain hyphens (OpenHAB doesn't like them)
+            const objectId = sanitizeEntityId(`${pathSegments.join('_')}`).replace(/-/g, '_');
+            // unique_id should avoid hyphens as well
+            const uniqueId = `mqttaitool_${taskName.replace(/-/g, '_')}_${pathSegments.join('_')}`;
             const baseJson = jsonPathFromSegments(pathSegments);
 
             // Decide if this node is an object-wrapper (has a Value property)
@@ -110,17 +114,21 @@ export function publishHaDiscovery() {
                     break;
                 case 'integer':
                 case 'number':
-                    domain = 'number';
+                    // use sensor domain for read‑only numeric values (number requires command_topic)
+                    domain = 'sensor';
+                    extras.state_class = 'measurement';
                     break;
                 case 'array':
                     domain = 'sensor';
                     // use length as state, keep array in attributes
                     valueTemplate = isWrapper ? `{{ ${baseJson}.Value | length }}` : `{{ ${baseJson} | length }}`;
                     extras.json_attributes = true;
+                    extras.state_class = 'measurement';
                     break;
                 case 'enum':
                     domain = 'sensor';
                     extras.options = (effectiveSchema as any).enum;
+                    extras.device_class = 'enum';
                     break;
                 case 'object':
                     domain = 'sensor';
@@ -129,21 +137,29 @@ export function publishHaDiscovery() {
                     break;
                 case 'string':
                 default:
-                    domain = 'text';
+                    domain = 'sensor';
                     break;
                 }
             }
 
-            const discoveryTopic = `${haPrefix}/${domain}/${objectId}/config`;
+            const discoveryTopic = `${haPrefix}/${domain}/${taskName}/${objectId}/config`;
             const payload: any = {
                 name: displayName,
                 unique_id: uniqueId,
                 state_topic: stateTopic,
                 value_template: valueTemplate,
-                availability_topic: `${config.mqtt.basetopic}/ONLINE`,
+                availability: {
+                    topic: `${config.mqtt.basetopic}/ONLINE`,
+                    payload_available: 'YES',
+                    payload_not_available: 'NO',
+                },
                 device: {
-                    identifiers: [`mqtt-ai-tool_${taskName}`],
-                    name: `mqtt-ai-tool ${taskName}`,
+                    // ensure identifier uses sanitized task name (hyphens → underscores)
+                    identifiers: [`mqttaitool_${sanitizeEntityId(taskName)}`],
+                    name: `${taskName}`,
+                },
+                origin: {
+                    name: 'mqtt-ai-tool',
                 },
                 json_attributes_topic: stateTopic,
                 ...extras,

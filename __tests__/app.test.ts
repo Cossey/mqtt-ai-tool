@@ -132,6 +132,30 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(payload.state_topic).toBe(`${config.mqtt.basetopic}/OUTPUT/gate/security`);
         // value_template should reference the top-level VehicleMovement field
         expect(payload.value_template).toMatch(/value_json\.VehicleMovement/);
+        // device identifier should be sanitized (hyphens allowed); gate_motion has underscore automatically
+        expect(payload.device.identifiers[0]).toBe('mqttaitool_gate_motion');
+        // using a hyphenated task name should produce hyphen in identifier
+        config.tasks['dash-task'] = {topic:'t',ha:true,prompt:{output:{X:{type:'string'}}}} as any;
+        (mqttService.publish as jest.Mock).mockClear();
+        await (await import('../src/app')).publishHaDiscovery();
+        const dashPayload = JSON.parse((mqttService.publish as jest.Mock).mock.calls.find((c:any)=>String(c[1]).includes('dash-task'))[1]);
+        expect(dashPayload.device.identifiers[0]).toBe('mqttaitool_dash-task');
+        // unique_id for dash-task should contain underscore instead of hyphen
+        expect(dashPayload.unique_id).toContain('dash_task');
+        // object_id: add a task containing a hyphen and verify the discovery topic uses underscore instead
+        config.tasks['hyphen-task'] = {
+            topic: 'h/yphen',
+            ha: true,
+            prompt: { output: { Foo: { type: 'string' } } }
+        } as any;
+        (mqttService.publish as jest.Mock).mockClear();
+        await (await import('../src/app')).publishHaDiscovery();
+        const hyphenCalls = (mqttService.publish as jest.Mock).mock.calls.filter((c: any) => typeof c[0] === 'string' && c[0].includes('hyphen_task'));
+        expect(hyphenCalls.length).toBeGreaterThan(0);
+        // ensure the object_id portion uses underscore (openhab safe)
+        expect(hyphenCalls[0][0]).toMatch(/hyphen_task/);
+
+
 
     });
 
@@ -170,8 +194,8 @@ describe('processPayload integration tests (mocked services)', () => {
         }
 
         expect(domains.StringField).toBe('text');
-        expect(domains.NumberField).toBe('number');
-        expect(domains.IntegerField).toBe('number');
+        expect(domains.NumberField).toBe('sensor');
+        expect(domains.IntegerField).toBe('sensor');
         expect(domains.BooleanField).toBe('binary_sensor');
         expect(domains.ArrayField).toBe('sensor');
         expect(domains.EnumField).toBe('sensor');
@@ -179,11 +203,12 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(domains.ObjectField).toBeUndefined();
         expect(domains['ObjectField.Value']).toBe('text');
 
-        // Enum discovery should include options in the payload
+        // Enum discovery should include options in the payload and proper device_class
         const enumDiscovery = calls.find((c: any) => String(c[1]).includes('EnumField'));
         expect(enumDiscovery).toBeDefined();
         const enumPayload = JSON.parse(enumDiscovery[1]);
         expect(enumPayload.options).toEqual(expect.arrayContaining(['A','B']));
+        expect(enumPayload.device_class).toBe('enum');
     });
 
     test('HA discovery exposes object sub-fields (Value/Confidence/BestGuess/Reasoning)', async () => {
