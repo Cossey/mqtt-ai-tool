@@ -130,8 +130,8 @@ describe('processPayload integration tests (mocked services)', () => {
         const payload = JSON.parse(vehicleDiscovery[1]);
         // state_topic should point to the task's OUTPUT subtopic (sanitized)
         expect(payload.state_topic).toBe(`${config.mqtt.basetopic}/OUTPUT/gate/security`);
-        // value_template should reference the top-level VehicleMovement field
-        expect(payload.value_template).toMatch(/value_json\.VehicleMovement/);
+        // value_template should reference the top-level VehicleMovement field under the "json" envelope
+        expect(payload.value_template).toMatch(/value_json\.json\.VehicleMovement/);
         // device identifier should be sanitized (hyphens allowed); gate_motion has underscore automatically
         expect(payload.device.identifiers[0]).toBe('mqttaitool_gate_motion');
         // using a hyphenated task name should produce hyphen in identifier
@@ -246,28 +246,28 @@ describe('processPayload integration tests (mocked services)', () => {
         expect(val).toBeDefined();
         const valPayload = JSON.parse(val[1]);
         expect(valPayload.name).toContain('PackageInfo.Value');
-        expect(valPayload.value_template).toMatch(/value_json\.PackageInfo\.Value/);
+        expect(valPayload.value_template).toMatch(/value_json\.json\.PackageInfo\.Value/);
 
         // Confidence sub-field -> number domain
         const conf = calls.find((c: any) => String(c[1]).includes('PackageInfo.Confidence'));
         expect(conf).toBeDefined();
         const confPayload = JSON.parse(conf[1]);
         expect(confPayload.name).toContain('PackageInfo.Confidence');
-        expect(confPayload.value_template).toMatch(/value_json\.PackageInfo\.Confidence/);
+        expect(confPayload.value_template).toMatch(/value_json\.json\.PackageInfo\.Confidence/);
 
         // BestGuess sub-field -> text domain
         const bg = calls.find((c: any) => String(c[1]).includes('PackageInfo.BestGuess'));
         expect(bg).toBeDefined();
         const bgPayload = JSON.parse(bg[1]);
         expect(bgPayload.name).toContain('PackageInfo.BestGuess');
-        expect(bgPayload.value_template).toMatch(/value_json\.PackageInfo\.BestGuess/);
+        expect(bgPayload.value_template).toMatch(/value_json\.json\.PackageInfo\.BestGuess/);
 
         // Reasoning sub-field -> text domain
         const rs = calls.find((c: any) => String(c[1]).includes('PackageInfo.Reasoning'));
         expect(rs).toBeDefined();
         const rsPayload = JSON.parse(rs[1]);
         expect(rsPayload.name).toContain('PackageInfo.Reasoning');
-        expect(rsPayload.value_template).toMatch(/value_json\.PackageInfo\.Reasoning/);
+        expect(rsPayload.value_template).toMatch(/value_json\.json\.PackageInfo\.Reasoning/);
     });
 
     test('status updates are emitted for camera loader and output published to sanitized topic', async () => {

@@ -27,7 +27,9 @@ function sanitizeEntityId(s: string): string {
 // Module-level helpers for HA discovery JSON path building
 const isSafeIdentifier = (n: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(n));
 const jsonPathFromSegments = (segments: string[]): string => {
-    let p = 'value_json';
+    // Output JSON is published as { tag, time, model, text, json: { ...aiFields } }
+    // so all AI-output properties live under the top-level "json" key.
+    let p = 'value_json.json';
     for (const s of segments) {
         if (isSafeIdentifier(s)) p += `.${s}`;
         else p += `['${String(s).replace(/'/g, "\\'")}']`;
@@ -48,11 +50,15 @@ export function publishHaDiscovery() {
         if (!task || !task.prompt) continue;
         if (!task.ha) continue; // feature opt-in per-task
 
-        // compute the OUTPUT state topic for this task (use task.topic if present)
+        // compute the OUTPUT and PROGRESS state topics for this task (use task.topic if present)
         let stateTopic = `${config.mqtt.basetopic}/OUTPUT`;
+        let progressTopic = `${config.mqtt.basetopic}/PROGRESS`;
         if (task.topic && typeof task.topic === 'string') {
             const sanitized = sanitizeTopic(task.topic);
-            if (sanitized) stateTopic = `${config.mqtt.basetopic}/OUTPUT/${sanitized}`;
+            if (sanitized) {
+                stateTopic = `${config.mqtt.basetopic}/OUTPUT/${sanitized}`;
+                progressTopic = `${config.mqtt.basetopic}/PROGRESS/${sanitized}`;
+            }
         }
 
         // Collect output properties from template chain (merged) and from task.prompt.output (task-level shorthand)
@@ -74,6 +80,56 @@ export function publishHaDiscovery() {
         }
 
         if (Object.keys(properties).length === 0) continue;
+
+        // ── Fixed envelope entities (always present on every OUTPUT message) ──────────
+        const sanitizedTaskNameFixed = sanitizeEntityId(taskName).replace(/-/g, '_');
+        const fixedAvailability = {
+            topic: `${config.mqtt.basetopic}/ONLINE`,
+            payload_available: 'YES',
+            payload_not_available: 'NO',
+        };
+        const fixedDevice = {
+            identifiers: [`mqttaitool_${sanitizeEntityId(taskName)}`],
+            name: `${taskName}`,
+        };
+        const fixedOrigin = { name: 'mqtt-ai-tool' };
+
+        const fixedEntities: { id: string; name: string; domain: string; valueTemplate: string; extras?: any }[] = [
+            { id: 'tag',      name: 'tag',      domain: 'sensor', valueTemplate: '{{ value_json.tag }}' },
+            { id: 'time',     name: 'time',     domain: 'sensor', valueTemplate: '{{ value_json.time }}',  extras: { state_class: 'measurement', unit_of_measurement: 's' } },
+            { id: 'model',    name: 'model',    domain: 'sensor', valueTemplate: '{{ value_json.model }}' },
+            { id: 'text',     name: 'text',     domain: 'sensor', valueTemplate: '{{ value_json.text }}' },
+        ];
+
+        for (const fe of fixedEntities) {
+            const discoveryTopic = `${haPrefix}/${fe.domain}/${sanitizedTaskNameFixed}/${fe.id}/config`;
+            const payload: any = {
+                name: fe.name,
+                unique_id: `mqttaitool_${sanitizedTaskNameFixed}_${fe.id}`,
+                state_topic: stateTopic,
+                value_template: fe.valueTemplate,
+                availability: fixedAvailability,
+                device: fixedDevice,
+                origin: fixedOrigin,
+                json_attributes_topic: stateTopic,
+                ...fe.extras,
+            };
+            mqttService.publish(discoveryTopic, JSON.stringify(payload), true);
+        }
+
+        // progress entity — plain text, separate topic, no value_template or json_attributes_topic
+        mqttService.publish(
+            `${haPrefix}/sensor/${sanitizedTaskNameFixed}/progress/config`,
+            JSON.stringify({
+                name: 'progress',
+                unique_id: `mqttaitool_${sanitizedTaskNameFixed}_progress`,
+                state_topic: progressTopic,
+                availability: fixedAvailability,
+                device: fixedDevice,
+                origin: fixedOrigin,
+            }),
+            true
+        );
 
         // Publish discovery for each top-level property (recursively traverse nested schemas)
 
@@ -228,7 +284,7 @@ async function initialize() {
 
         mqttService.on('connected', () => {
             logger.info('MQTT connection established, initializing channels...');
-            mqttService.initializeChannels(config.cameras);
+            mqttService.initializeChannels();
             // Publish Home Assistant discovery entries for tasks with ha:true
             try {
                 publishHaDiscovery();
@@ -892,11 +948,8 @@ async function gracefulShutdown(signal: string) {
     logger.info(`Received ${signal}, shutting down gracefully...`);
 
     try {
-        // Update all camera statuses to offline
-        const cameras = Object.keys(config.cameras);
-        cameras.forEach(cameraName => {
-            statusService.updateStatus(cameraName, 'Offline');
-        });
+        // Reset PROGRESS to Idle before disconnecting so it doesn't linger with a camera name
+        mqttService.publish(`${config.mqtt.basetopic}/PROGRESS`, 'Offline', true);
 
         mqttService.gracefulShutdown();
 

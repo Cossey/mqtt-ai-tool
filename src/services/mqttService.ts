@@ -54,9 +54,11 @@ export class MqttService extends EventEmitter {
                 logger.info('Connected to MQTT broker successfully');
                 this.reconnectAttempts = 0;
 
-                // Publish online status as "YES" when connected
-                this.publish(onlineTopic, 'YES', true);
-                logger.info(`Published online status to: ${onlineTopic}`);
+                // Publish online status as "YES" directly (bypass connected guard — we are in the connect callback)
+                this.client.publish(onlineTopic, 'YES', { retain: true, qos: 1 }, (err) => {
+                    if (err) logger.error(`Failed to publish online status: ${err.message}`);
+                    else logger.info(`Published online status to: ${onlineTopic}`);
+                });
 
                 // Subscribe to the single INPUT topic for JSON requests
                 const inputTopic = `${this.config.basetopic}/INPUT`;
@@ -219,8 +221,10 @@ export class MqttService extends EventEmitter {
 
     public publish(topic: string, message: string, retain: boolean = false) {
         if (this.client && this.client.connected) {
+            // Use qos:1 for retained messages so the broker reliably applies the retain flag
+            const qos = retain ? 1 : 0;
             logger.info(`Publishing to "${topic}": "${message}"${retain ? ' (retained)' : ''}`);
-            this.client.publish(topic, message, { retain: retain }, (err) => {
+            this.client.publish(topic, message, { retain, qos }, (err) => {
                 if (err) {
                     logger.error(`Failed to publish to ${topic}: ${err.message}`);
                 } else {
@@ -234,8 +238,9 @@ export class MqttService extends EventEmitter {
 
     public publishBinary(topic: string, data: Buffer, retain: boolean = false) {
         if (this.client && this.client.connected) {
+            const qos = retain ? 1 : 0;
             logger.info(`Publishing binary data to "${topic}": ${data.length} bytes${retain ? ' (retained)' : ''}`);
-            this.client.publish(topic, data, { retain: retain }, (err) => {
+            this.client.publish(topic, data, { retain, qos }, (err) => {
                 if (err) {
                     logger.error(`Failed to publish binary data to ${topic}: ${err.message}`);
                 } else {
@@ -276,7 +281,7 @@ export class MqttService extends EventEmitter {
         this.publishProgress(cameraName, status);
     }
 
-    public initializeChannels(cameras: Record<string, any>) {
+    public initializeChannels() {
         logger.info(`Initializing MQTT base channels for project...`);
         logger.debug(`Using basetopic: "${this.config.basetopic}"`);
 
@@ -293,14 +298,6 @@ export class MqttService extends EventEmitter {
         // PROGRESS is plain text; initialize with a generic Idle message
         this.publish(progressTopic, 'Idle', true);
         this.publish(queuedTopic, '0', true);
-
-        // Initialize per-camera progress entries (retain) so a meaningful PROGRESS message exists early
-        if (cameras && Object.keys(cameras).length > 0) {
-            Object.keys(cameras).forEach(name => {
-                // publish per-camera Idle messages (plain text: "<camera>: Idle")
-                this.publish(progressTopic, `${name}: Idle`, true);
-            });
-        }
 
         logger.info('Base channel initialization complete');
     }
