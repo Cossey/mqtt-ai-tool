@@ -274,8 +274,20 @@ statusService.on('statsUpdate', (cameraName: string, stats: any) => {
     mqttService.publishStats(cameraName, stats, currentProcessingTopic);
 });
 
+// Queue entry types for sequential processing
+interface ImmediateLoaderResult {
+    files: string[];
+    promptAdditions: string[];
+    processedIndices: Set<number>;
+}
+
+interface QueueEntry {
+    payload: any;
+    immediateFilesPromise?: Promise<ImmediateLoaderResult>;
+}
+
 // Input queue for sequential processing
-const inputQueue: any[] = [];
+const inputQueue: QueueEntry[] = [];
 let processing = false;
 
 async function initialize() {
@@ -306,6 +318,39 @@ async function initialize() {
     }
 }
 
+/**
+ * Resolve a task payload by merging task template with payload overrides.
+ * Returns the resolved payload, task name, and any error.
+ */
+export function resolveTaskPayload(payload: any): { resolved: any; taskName?: string; error?: string } {
+    if (!payload.task || typeof payload.task !== 'string') {
+        return { resolved: payload };
+    }
+
+    const taskName = payload.task;
+    const taskTemplate = config.tasks?.[taskName];
+
+    if (!taskTemplate) {
+        return { resolved: payload, taskName, error: `Unknown task: ${taskName}` };
+    }
+
+    const resolved = {
+        ai: payload.ai || taskTemplate.ai,
+        topic: payload.topic || taskTemplate.topic,
+        tag: payload.tag,
+        prompt: {
+            template: payload.prompt?.template || taskTemplate.prompt.template,
+            text: payload.prompt?.text || taskTemplate.prompt.text,
+            output: payload.prompt?.output || taskTemplate.prompt.output,
+            model: payload.prompt?.model || taskTemplate.prompt.model,
+            files: payload.prompt?.files || taskTemplate.prompt.files,
+            loader: payload.prompt?.loader || taskTemplate.prompt.loader
+        }
+    };
+
+    return { resolved, taskName };
+}
+
 function enqueueInput(payload: any) {
     // Additional safety check: ignore empty or invalid payloads
     if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
@@ -319,7 +364,40 @@ function enqueueInput(payload: any) {
         return;
     }
 
-    inputQueue.push(payload);
+    // Determine queue setting from task config and payload override
+    let shouldQueue = true;
+    let taskTemplate: any = null;
+    if (payload.task && typeof payload.task === 'string') {
+        taskTemplate = config.tasks?.[payload.task];
+        if (taskTemplate && taskTemplate.queue !== undefined) {
+            shouldQueue = taskTemplate.queue !== false;
+        }
+    }
+
+    // Payload-level queue override takes priority
+    if (payload.queue !== undefined) {
+        shouldQueue = payload.queue !== false;
+    }
+
+    if (!shouldQueue) {
+        // Non-queued: process immediately, bypassing the queue
+        logger.info(`Processing non-queued INPUT (tag="${payload.tag}") immediately`);
+        processPayload(payload).catch(err => logger.error(`Failed to process non-queued input: ${err}`));
+        return;
+    }
+
+    // For queued tasks, check for immediate loaders
+    const loaders = payload.prompt?.loader || taskTemplate?.prompt?.loader;
+    const hasImmediateLoaders = Array.isArray(loaders) && loaders.some((l: any) => l.immediate === true);
+
+    const entry: QueueEntry = { payload };
+
+    if (hasImmediateLoaders) {
+        logger.info(`Starting immediate loader processing for queued INPUT (tag="${payload.tag}")`);
+        entry.immediateFilesPromise = processImmediateLoaders(payload);
+    }
+
+    inputQueue.push(entry);
     publishQueueCount();
     if (!processing) {
         processNextInput().catch(err => logger.error(`Failed to process next input: ${err}`));
@@ -331,7 +409,286 @@ function publishQueueCount() {
     mqttService.publish(`${config.mqtt.basetopic}/QUEUED`, String(count), true);
 }
 
-export async function processPayload(payload: any) {
+/**
+ * Process a single loader item and return collected files and prompt text additions.
+ * Used by processImmediateLoaders for pre-processing immediate loaders before their turn in the queue.
+ */
+async function processLoaderItem(
+    loader: any,
+    loaderNum: number,
+    loaderTotal: number,
+    loaderTypeIndex: number,
+    primaryCamera: string | undefined,
+): Promise<{ files: string[]; promptAdditions: string[] }> {
+    const files: string[] = [];
+    const promptAdditions: string[] = [];
+
+    // Generic loader progress update
+    if (primaryCamera) statusService.updateStatus(primaryCamera, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
+    else statusService.updateStatus(undefined, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
+
+    if (loader.type === 'camera') {
+        const source = loader.source;
+        const cam = config.cameras[source];
+        if (!cam) throw new Error(`Unknown camera source: ${source}`);
+
+        let rtspUrl: string;
+        if (typeof cam === 'string') {
+            rtspUrl = cam;
+        } else {
+            const url = new URL(cam.url);
+            url.username = cam.username || url.username || '';
+            let pass = cam.password;
+            if (!pass && cam.password_file) {
+                try {
+                    if (fs.existsSync(cam.password_file)) pass = fs.readFileSync(cam.password_file, 'utf8').trim();
+                    else logger.warn(`Camera ${source} password_file '${cam.password_file}' does not exist`);
+                } catch (e) {
+                    logger.warn(`Could not read camera password_file for ${source}: ${e}`);
+                }
+            }
+            url.password = pass || url.password || '';
+            rtspUrl = url.toString();
+        }
+
+        const captures = loader.options?.captures || 1;
+        const interval = loader.options?.interval || 1000;
+
+        const captureStartTime = Date.now();
+        let totalCaptureTime = 0;
+
+        for (let i = 0; i < captures; i++) {
+            if (primaryCamera) statusService.updateStatus(source, `Capturing (${i + 1} of ${captures})`);
+            else statusService.updateStatus(undefined, `Capturing (${i + 1} of ${captures})`);
+
+            const singleCaptureStart = Date.now();
+            const imagePath = await cameraService.captureImage(rtspUrl);
+            const singleCaptureEnd = Date.now();
+            totalCaptureTime += (singleCaptureEnd - singleCaptureStart) / 1000;
+
+            files.push(imagePath);
+
+            if (i < captures - 1 && interval > 0) {
+                if (primaryCamera) statusService.updateStatus(source, `Waiting for next capture (${i + 1} of ${captures})`);
+                else statusService.updateStatus(undefined, `Waiting for next capture (${i + 1} of ${captures})`);
+                await new Promise(r => setTimeout(r, interval));
+            } else {
+                if (primaryCamera) statusService.updateStatus(source, `Captured (${i + 1} of ${captures})`);
+                else statusService.updateStatus(undefined, `Captured (${i + 1} of ${captures})`);
+            }
+        }
+
+        const totalElapsedTime = (Date.now() - captureStartTime) / 1000;
+
+        if (primaryCamera) {
+            statusService.updateStats(primaryCamera, {
+                loader: {
+                    camera: {
+                        [source]: {
+                            lastCaptureTime: totalCaptureTime / captures,
+                            lastTotalCaptureTime: totalElapsedTime
+                        }
+                    }
+                }
+            });
+        }
+    } else if (loader.type === 'url') {
+        const sourceUrl = loader.source;
+
+        if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
+        else statusService.updateStatus(undefined, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
+
+        const urlStartTime = Date.now();
+        const { tmpPath, httpCode, fileSize } = await downloadUrlToTempWithMetrics(sourceUrl);
+        const urlElapsedTime = (Date.now() - urlStartTime) / 1000;
+
+        files.push(tmpPath);
+
+        if (primaryCamera) {
+            const existingLoaderStats = statusService.getStats(primaryCamera).loader || {};
+            const existingUrlStats = existingLoaderStats.url || {};
+            statusService.updateStats(primaryCamera, {
+                loader: {
+                    ...existingLoaderStats,
+                    url: {
+                        ...existingUrlStats,
+                        [loaderTypeIndex]: {
+                            lastDownloadTime: urlElapsedTime,
+                            lastHTTPCode: httpCode,
+                            lastFileSize: fileSize
+                        }
+                    }
+                }
+            });
+        }
+
+        if (primaryCamera) statusService.updateStatus(primaryCamera, `URL fetched (${loaderNum} of ${loaderTotal})`);
+        else statusService.updateStatus(undefined, `URL fetched (${loaderNum} of ${loaderTotal})`);
+    } else if (loader.type === 'database') {
+        const source = loader.source;
+        const dbConfig = config.databases?.[source];
+        if (!dbConfig) throw new Error(`Unknown database source: ${source}`);
+        if (dbConfig.type !== 'mariadb') throw new Error(`Unsupported database type for ${source}: ${dbConfig.type}`);
+
+        if (primaryCamera) statusService.updateStatus(primaryCamera, `Querying DB ${loaderNum} of ${loaderTotal}: ${source}`);
+        else statusService.updateStatus(undefined, `Querying DB ${loaderNum} of ${loaderTotal}: ${source}`);
+
+        const query = loader.options?.query;
+        if (!query) throw new Error(`Database loader for ${source} missing 'query' option`);
+
+        const attach = loader.options?.attach || 'csv';
+
+        const mariadb = (await import('mariadb')).default || (await import('mariadb'));
+
+        const conn = await mariadb.createConnection({
+            host: dbConfig.server,
+            port: dbConfig.port || 3306,
+            user: dbConfig.username,
+            password: dbConfig.password || (dbConfig.password_file ? fs.readFileSync(dbConfig.password_file, 'utf8').trim() : undefined),
+            database: dbConfig.database,
+        });
+
+        try {
+            const queryStartTime = Date.now();
+            const rows = await conn.query(query);
+            const queryElapsedTime = (Date.now() - queryStartTime) / 1000;
+
+            const resultRows = Array.isArray(rows) ? rows : [rows];
+            const rowCount = resultRows.length;
+
+            if (primaryCamera) {
+                const existingLoaderStats = statusService.getStats(primaryCamera).loader || {};
+                const existingDbStats = existingLoaderStats.database || {};
+                const existingSourceStats = existingDbStats[source] || {};
+                statusService.updateStats(primaryCamera, {
+                    loader: {
+                        ...existingLoaderStats,
+                        database: {
+                            ...existingDbStats,
+                            [source]: {
+                                ...existingSourceStats,
+                                [loaderTypeIndex]: {
+                                    lastQueryTime: queryElapsedTime,
+                                    lastQueryRows: rowCount
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            if (attach === 'csv') {
+                const csv = rowsToCsv(resultRows);
+                const os = await import('os');
+                const path = await import('path');
+                const tmpName = `mqttai_db_${source}_${Date.now()}_${Math.round(Math.random() * 10000)}.csv`;
+                const tmpPath = path.join(os.tmpdir(), tmpName);
+                fs.writeFileSync(tmpPath, csv);
+                files.push(tmpPath);
+            } else {
+                promptAdditions.push(`\n\nDatabase ${source} query results:\n${rowsToCsv(resultRows)}`);
+            }
+        } finally {
+            try { await conn.end(); } catch (e) { logger.warn(`Error closing DB connection: ${e}`); }
+        }
+    } else if (loader.type === 'mqtt') {
+        const source = loader.source;
+        if (!source) throw new Error('MQTT loader requires a "source" topic');
+
+        const topic = source.startsWith(config.mqtt.basetopic) ? source : `${config.mqtt.basetopic}/${source}`;
+        const timeout = loader.options?.timeout || 5000;
+        const attach = loader.options?.attach || 'inline';
+
+        logger.info(`Fetching MQTT topic '${topic}' for loader`);
+
+        if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching MQTT topic: ${topic}`);
+        else statusService.updateStatus(undefined, `Fetching MQTT topic: ${topic}`);
+
+        const { payload: mqttPayload, isBinary } = await mqttService.fetchTopicMessage(topic, timeout);
+
+        if (primaryCamera) statusService.updateStatus(primaryCamera, 'MQTT topic fetched');
+        else statusService.updateStatus(undefined, 'MQTT topic fetched');
+
+        if (isBinary && Buffer.isBuffer(mqttPayload)) {
+            const buf: Buffer = mqttPayload as Buffer;
+            const mime = detectMime(buf);
+
+            if (attach === 'inline') {
+                promptAdditions.push(`\n\nMQTT topic ${topic} returned binary data (base64): ${buf.toString('base64')}`);
+            } else {
+                const tmpPath = await writeBufferToTemp(buf, topic, mime);
+                files.push(tmpPath);
+            }
+        } else {
+            const text = String(mqttPayload);
+            if (attach === 'inline') {
+                promptAdditions.push(`\n\nMQTT topic ${topic} contents:\n${text}`);
+            } else {
+                const tmpPath = await writeBufferToTemp(Buffer.from(text, 'utf8'), topic, 'text/plain');
+                files.push(tmpPath);
+            }
+        }
+    } else {
+        logger.warn(`Unknown loader type: ${loader.type}`);
+    }
+
+    return { files, promptAdditions };
+}
+
+/**
+ * Process immediate loaders for a queued task in the background.
+ * Only processes loaders with immediate: true, before the task reaches the front of the queue.
+ */
+async function processImmediateLoaders(payload: any): Promise<ImmediateLoaderResult> {
+    const result: ImmediateLoaderResult = {
+        files: [],
+        promptAdditions: [],
+        processedIndices: new Set(),
+    };
+
+    try {
+        // Resolve the task payload to get the full loader list
+        const { resolved, error } = resolveTaskPayload(payload);
+        if (error) {
+            logger.warn(`Cannot process immediate loaders: ${error}`);
+            return result;
+        }
+
+        const loaders = resolved.prompt?.loader;
+        if (!loaders || !Array.isArray(loaders)) return result;
+
+        const primaryCamera = loaders.find((l: any) => l.type === 'camera')?.source;
+
+        for (let lIdx = 0; lIdx < loaders.length; lIdx++) {
+            const loader = loaders[lIdx];
+            if (!loader.immediate) continue;
+
+            // Compute type-specific index (count all loaders of same type up to this index)
+            let typeIndex = 0;
+            for (let i = 0; i <= lIdx; i++) {
+                if (loaders[i].type === loader.type) typeIndex++;
+            }
+
+            logger.info(`Processing immediate loader ${lIdx + 1} of ${loaders.length} (${loader.type})`);
+
+            const loaderResult = await processLoaderItem(
+                loader, lIdx + 1, loaders.length, typeIndex, primaryCamera
+            );
+
+            result.files.push(...loaderResult.files);
+            result.promptAdditions.push(...loaderResult.promptAdditions);
+            result.processedIndices.add(lIdx);
+        }
+
+        logger.info(`Immediate loader processing complete: ${result.processedIndices.size} loaders processed, ${result.files.length} files collected`);
+    } catch (err) {
+        logger.error(`Error processing immediate loaders: ${err}`);
+    }
+
+    return result;
+}
+
+export async function processPayload(payload: any, preProcessed?: ImmediateLoaderResult) {
     const startTime = Date.now();
 
     // Task resolution: if payload references a task, merge task template with payload overrides
@@ -500,6 +857,14 @@ export async function processPayload(payload: any) {
                 statusService.updateStatus(primaryCamera, 'Starting capture');
             }
 
+            // Inject pre-processed immediate loader results
+            if (preProcessed) {
+                tempFiles.push(...preProcessed.files);
+                for (const addition of preProcessed.promptAdditions) {
+                    promptText = `${promptText}${addition}`;
+                }
+            }
+
             // Loader type counters (1-based index per type)
             const loaderTypeCounters: Record<string, number> = {};
 
@@ -512,6 +877,9 @@ export async function processPayload(payload: any) {
                 if (!loaderTypeCounters[loader.type]) loaderTypeCounters[loader.type] = 0;
                 loaderTypeCounters[loader.type]++;
                 const loaderTypeIndex = loaderTypeCounters[loader.type];
+
+                // Skip loaders already processed as immediate
+                if (preProcessed?.processedIndices.has(lIdx)) continue;
 
                 // Generic loader progress update
                 if (primaryCamera) statusService.updateStatus(primaryCamera, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
@@ -816,11 +1184,20 @@ async function processNextInput() {
     processing = true;
     publishQueueCount();
 
-    const payload = inputQueue.shift();
+    const entry = inputQueue.shift()!;
+    const payload = entry.payload;
     logger.info(`Processing INPUT payload with tag="${payload?.tag}"`);
 
     try {
-        await processPayload(payload);
+        // If immediate loaders were pre-processed, await their results
+        let preProcessed: ImmediateLoaderResult | undefined;
+        if (entry.immediateFilesPromise) {
+            logger.info(`Awaiting immediate loader results for tag="${payload?.tag}"`);
+            preProcessed = await entry.immediateFilesPromise;
+            logger.info(`Immediate loader results ready: ${preProcessed.files.length} files, ${preProcessed.processedIndices.size} loaders pre-processed`);
+        }
+
+        await processPayload(payload, preProcessed);
     } catch (error) {
         logger.error(`Error processing INPUT payload: ${error}`);
     } finally {

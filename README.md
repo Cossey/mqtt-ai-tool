@@ -9,6 +9,8 @@ The MQTT AI Tool is a TypeScript/Node.js application that listens for JSON `INPU
 ## Features
 
 - **Single INPUT topic**: Submit JSON requests to `<basetopic>/INPUT`; requests are queued and processed sequentially.
+- **Queue bypass**: Tasks or individual requests can opt out of queuing with `queue: false` to process immediately.
+- **Immediate loaders**: Individual loaders within a queued task can begin processing right away (e.g., start capturing camera images) while the task waits in the queue.
 - **Multiple loaders**: Camera, URL, File, MQTT topic, and Database (MariaDB) loaders are supported.
 - **Flexible attachments**: Attach files, embed data inline, or attach CSV exports of query results.
 - **RTSP Camera Support**: Capture high-quality images using FFmpeg when requested by a loader.
@@ -143,8 +145,10 @@ To avoid repeating the same JSON configuration for common tasks, you can define 
 
 ```yaml
 tasks:
+  # queue: false means this task bypasses the queue and runs immediately
   garage_check:
     ai: openai
+    queue: false
     topic: garage/monitoring
     prompt:
       template: garage_prompt
@@ -167,6 +171,7 @@ tasks:
             interval: 2000
 
   # Task with multiple template chaining
+  # Loaders with immediate: true start processing while the task waits in the queue
   comprehensive_check:
     ai: openai
     topic: monitoring/comprehensive
@@ -176,6 +181,7 @@ tasks:
       loader:
         - type: camera
           source: gate
+          immediate: true  # start capturing right away, even while queued
         - type: camera
           source: garage
 
@@ -214,11 +220,12 @@ You can also override any task fields in the INPUT:
 
 - **`ai`** (optional) - AI backend to use for this task
 - **`topic`** (optional) - Default topic routing for this task's outputs
+- **`queue`** (optional, default: `true`) - Whether to queue this task. Set to `false` to bypass the queue and process the task immediately when received.
 - **`prompt`** (required) - Prompt configuration including:
   - `template` - Single template name or array of template names for chaining (e.g., `["template1", "template2"]`)
   - `text` - Inline prompt text
   - `output` - Structured output schema (old-style shorthand). When `prompt.template` is an array, `output`/`response_format` from each template are **merged** (union of properties) into a single `response_format` that will be sent to the AI; duplicate property definitions follow **last‑wins** (the rightmost template overrides). An inline `prompt.output` in the INPUT will always override template-defined schemas.
-  - `loader` - Array of loader configurations
+  - `loader` - Array of loader configurations (each loader may include `immediate: true` to begin processing while the task is still queued)
 
 **INPUT with Task Reference:**
 
@@ -226,6 +233,7 @@ You can also override any task fields in the INPUT:
 - **`tag`** (optional) - Request identifier
 - **`topic`** (optional) - Override task's default topic
 - **`ai`** (optional) - Override task's AI backend
+- **`queue`** (optional) - Override task's `queue` setting (`true` to force queueing, `false` to bypass the queue)
 - **`prompt`** (optional) - Override any prompt fields from the task template
 
 #### Standard INPUT JSON Format (Full Specification)
@@ -255,11 +263,12 @@ You can also override any task fields in the INPUT:
 - **`tag`** (optional) - Identifier for this request; returned in OUTPUT for correlation
 - **`topic`** (optional) - Custom subtopic for OUTPUT/PROGRESS/STATS routing (e.g., `"gate/security"`)
 - **`ai`** (optional) - Name of AI backend from config; defaults to first configured backend
+- **`queue`** (optional, default: `true`) - Whether to queue this request. Set to `false` to bypass the queue and process immediately. Overrides any task-level `queue` setting.
 - **`prompt.template`** (optional) - Name of prompt template from config
 - **`prompt.text`** (optional) - Inline prompt text; injected into template's `{{prompt}}` placeholder or appended
 - **`prompt.output`** (optional) - Inline JSON schema for structured responses
 - **`prompt.files`** (optional) - Array of local file paths to attach
-- **`prompt.loader`** (optional) - Array of loader objects (camera, url, file, mqtt, database)
+- **`prompt.loader`** (optional) - Array of loader objects (camera, url, file, mqtt, database). Each loader may include `"immediate": true` to begin processing while the task is still queued.
 
 #### OUTPUT JSON (returned on `<basetopic>/OUTPUT`)
 
@@ -472,6 +481,76 @@ The `/STATS` topic publishes a JSON object with performance metrics:
 8. **Queued / Reset**: There is no per-camera reset; the queue length is reflected on `<basetopic>/QUEUED` and completed requests are returned via `<basetopic>/OUTPUT`.
 9. **Cleanup**: All temporary files are deleted automatically after processing.
 
+### Queue Bypass & Immediate Loaders
+
+By default all INPUT requests are queued and processed one at a time. Two mechanisms allow you to control this behaviour:
+
+#### Queue Bypass (`queue: false`)
+
+Set `queue: false` on a task template in `config.yaml` or in the INPUT JSON payload to skip the queue entirely. The request will be processed immediately in parallel with whatever is currently being processed.
+
+**In config.yaml (task-level default):**
+
+```yaml
+tasks:
+  quick_check:
+    queue: false          # always bypass the queue
+    ai: openai
+    prompt:
+      text: "Quick status check"
+      loader:
+        - type: camera
+          source: garage
+```
+
+**In INPUT JSON (per-request override):**
+
+```json
+{"task": "gate_motion", "tag": "urgent", "queue": false}
+```
+
+The payload-level `queue` always takes priority over the task template setting. This means you can force a normally-queued task to run immediately, or force a normally-unqueued task back into the queue:
+
+```json
+{"task": "quick_check", "tag": "low-priority", "queue": true}
+```
+
+#### Immediate Loaders (`immediate: true`)
+
+For tasks that *are* queued, individual loaders can be marked with `immediate: true` so they start processing right away — even while the task is still waiting for its turn in the queue. When the task reaches the front of the queue, the results from these loaders are already available and are merged in; only the remaining (non-immediate) loaders are processed at that point.
+
+This is useful for time-sensitive data collection. For example, you want to capture a camera image *now* (while the event is happening) but the AI analysis can wait its turn in the queue:
+
+```yaml
+tasks:
+  security_alert:
+    ai: openai
+    topic: security/alerts
+    prompt:
+      template: security_prompt
+      loader:
+        - type: camera
+          source: gate
+          immediate: true    # capture starts immediately when INPUT is received
+          options:
+            captures: 3
+            interval: 1000
+        - type: database
+          source: main
+          options:
+            query: "SELECT * FROM recent_events"
+            attach: csv
+```
+
+In this example the camera captures begin as soon as the INPUT arrives. The database query (not marked `immediate`) waits until the task reaches the front of the queue. Once all loaders are complete the combined data is sent to the AI.
+
+**Key points:**
+
+- `immediate` defaults to `false` for all loaders.
+- Immediate loaders run in the background; errors are logged but do not block the queue.
+- Files and prompt additions produced by immediate loaders are merged into the task when it is finally processed.
+- If `queue: false` is set on the task, all loaders run immediately regardless of the `immediate` flag (the entire task bypasses the queue).
+
 ### Multi-Image Capture
 
 The application supports capturing multiple sequential images to provide AI with temporal context for motion detection and analysis:
@@ -537,8 +616,10 @@ prompts:
 
 ```yaml
 tasks:
+  # queue: false bypasses the queue — runs immediately
   garage_check:
     ai: openai
+    queue: false
     topic: garage/monitoring
     prompt:
       template: garage_prompt
@@ -556,6 +637,7 @@ tasks:
       loader:
         - type: camera
           source: gate
+          immediate: true   # start capturing right away, even while queued
           options:
             captures: 5
             interval: 2000
@@ -655,6 +737,12 @@ mosquitto_pub -h mqtt-server -t "mqttai/INPUT" -m '{"task":"gate_motion","tag":"
 
 # Task reference with AI backend override
 mosquitto_pub -h mqtt-server -t "mqttai/INPUT" -m '{"task":"daily_report","tag":"report-001","ai":"openai-gpt4"}'
+
+# Queue bypass - process this request immediately, skipping the queue
+mosquitto_pub -h mqtt-server -t "mqttai/INPUT" -m '{"task":"gate_motion","tag":"urgent-alert","queue":false}'
+
+# Force queueing for a task that has queue: false in config
+mosquitto_pub -h mqtt-server -t "mqttai/INPUT" -m '{"task":"garage_check","tag":"low-priority","queue":true}'
 ```
 
 #### Camera loader (single image)
@@ -869,13 +957,19 @@ Task templates combine prompts with loaders and other settings to create reusabl
 
 - `ai`: (optional) AI backend to use for this task
 - `topic`: (optional) Default topic routing for OUTPUT/PROGRESS/STATS
+- `queue`: (optional, default: `true`) Whether to queue this task. Set to `false` to bypass the queue and process immediately. Can be overridden per-request in the INPUT JSON.
+- `ha`: (optional, default: `false`) Opt-in per task to publish Home Assistant MQTT discovery entries.
 - `prompt`: (required) Prompt configuration object:
   - `template`: (optional) Single prompt template name (string) or array of template names (string[]) for chaining. When multiple templates are provided, they are processed left-to-right with later templates inserted into earlier ones using `{{template}}` placeholders (e.g., `["base_template", "specific_template"]`)
   - `text`: (optional) Inline prompt text
   - `output`: (optional) JSON schema for structured responses
   - `model`: (optional) Model override
 - `files`: (optional) Array of file paths to attach
-- `loader`: (optional) Array of loader configurations
+- `loader`: (optional) Array of loader configurations. Each loader object supports:
+  - `type`: Loader type (`camera`, `url`, `file`, `mqtt`, `database`)
+  - `source`: Data source identifier
+  - `immediate`: (optional, default: `false`) When `true`, this loader begins processing immediately even while the task is waiting in the queue.
+  - `options`: (optional) Loader-specific options
 
 Tasks are referenced in INPUT using `{"task": "task_name"}` and can have fields overridden by the INPUT payload.
 

@@ -111,9 +111,10 @@ databases:
 # Task templates: Pre-configured tasks that combine prompts with loaders
 # Tasks reduce repetitive JSON in INPUT requests - just reference the task name
 tasks:
-  # Simple single-camera task
+  # Simple single-camera task (queue: false bypasses queue, runs immediately)
   garage_check:
     ai: openai
+    queue: false
     topic: garage/monitoring
     prompt:
       template: garage_prompt
@@ -138,6 +139,7 @@ tasks:
 
   # Task with multiple template chaining (templates are processed left-to-right)
   # The second template is inserted into the first template's {{template}} placeholder
+  # Loaders with immediate: true start processing right away, even while the task is still queued
   comprehensive_check:
     ai: openai
     topic: monitoring/comprehensive
@@ -147,6 +149,7 @@ tasks:
       loader:
         - type: camera
           source: gate
+          immediate: true  # start capturing immediately, even while task is waiting in queue
           options:
             captures: 1
         - type: camera
@@ -171,3 +174,5 @@ tasks:
 # Usage examples:
 # Simple task: mosquitto_pub -t "mqttai/INPUT" -m '{"task":"garage_check","tag":"check-001"}'
 # With override: mosquitto_pub -t "mqttai/INPUT" -m '{"task":"gate_motion","tag":"alert","topic":"gate/urgent"}'
+# Queue bypass (override): mosquitto_pub -t "mqttai/INPUT" -m '{"task":"gate_motion","tag":"urgent","queue":false}'
+# Force queueing (override task config): mosquitto_pub -t "mqttai/INPUT" -m '{"task":"garage_check","tag":"check","queue":true}'

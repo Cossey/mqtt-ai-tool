@@ -73,6 +73,7 @@ export interface TaskConfig {
     ai?: string; // AI backend to use
     topic?: string; // Optional topic routing
     ha?: boolean; // expose outputs to Home Assistant discovery (optional, default false)
+    queue?: boolean; // whether to queue this task (default: true). Set to false to bypass queue and process immediately.
     prompt: {
         template?: string | string[]; // Prompt template name(s)
         text?: string; // Inline prompt text
@@ -82,6 +83,7 @@ export interface TaskConfig {
         loader?: Array<{
             type: string;
             source: string;
+            immediate?: boolean; // process this loader immediately even when task is queued (default: false)
             options?: Record<string, any>;
         }>;
     };
