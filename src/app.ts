@@ -693,35 +693,19 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
 
     // Task resolution: if payload references a task, merge task template with payload overrides
     if (payload.task && typeof payload.task === 'string') {
-        const taskName = payload.task;
-        const taskTemplate = config.tasks?.[taskName];
+        const { resolved, taskName, error } = resolveTaskPayload(payload);
 
-        if (!taskTemplate) {
+        if (error) {
             logger.error(`Unknown task referenced: ${taskName}`);
             mqttService.publish(`${config.mqtt.basetopic}/OUTPUT`, JSON.stringify({
                 tag: payload.tag,
-                error: `Unknown task: ${taskName}`
+                error
             }), false);
             return { skipped: true };
         }
 
         logger.info(`Resolving task template: ${taskName}`);
-
-        // Merge task template with payload, giving priority to payload overrides
-        payload = {
-            ai: payload.ai || taskTemplate.ai,
-            topic: payload.topic || taskTemplate.topic,
-            tag: payload.tag, // Keep original tag if provided
-            prompt: {
-                template: payload.prompt?.template || taskTemplate.prompt.template,
-                text: payload.prompt?.text || taskTemplate.prompt.text,
-                output: payload.prompt?.output || taskTemplate.prompt.output,
-                model: payload.prompt?.model || taskTemplate.prompt.model,
-                files: payload.prompt?.files || taskTemplate.prompt.files,
-                loader: payload.prompt?.loader || taskTemplate.prompt.loader
-            }
-        };
-
+        payload = resolved;
         logger.debug(`Task ${taskName} resolved with overrides: ${JSON.stringify(payload)}`);
     }
 
@@ -881,234 +865,12 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
                 // Skip loaders already processed as immediate
                 if (preProcessed?.processedIndices.has(lIdx)) continue;
 
-                // Generic loader progress update
-                if (primaryCamera) statusService.updateStatus(primaryCamera, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
-                else statusService.updateStatus(undefined, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
+                // Delegate to the shared loader processor
+                const loaderResult = await processLoaderItem(loader, loaderNum, loaderTotal, loaderTypeIndex, primaryCamera);
 
-                if (loader.type === 'camera') {
-                    const source = loader.source;
-                    const cam = config.cameras[source];
-                    if (!cam) throw new Error(`Unknown camera source: ${source}`);
-
-                    // Resolve camera RTSP URL and credentials
-                    let rtspUrl: string;
-                    if (typeof cam === 'string') {
-                        rtspUrl = cam;
-                    } else {
-                        // camera object with separate creds
-                        const url = new URL(cam.url);
-                        url.username = cam.username || url.username || '';
-                        let pass = cam.password;
-                        if (!pass && cam.password_file) {
-                            try {
-                                if (fs.existsSync(cam.password_file)) pass = fs.readFileSync(cam.password_file, 'utf8').trim();
-                                else logger.warn(`Camera ${source} password_file '${cam.password_file}' does not exist`);
-                            } catch (e) {
-                                logger.warn(`Could not read camera password_file for ${source}: ${e}`);
-                            }
-                        }
-                        url.password = pass || url.password || '';
-                        rtspUrl = url.toString();
-                    }
-
-                    const captures = loader.options?.captures || 1;
-                    const interval = loader.options?.interval || 1000;
-
-                    const captureStartTime = Date.now();
-                    let totalCaptureTime = 0; // Track actual capture time (excluding intervals)
-
-                    for (let i = 0; i < captures; i++) {
-                        // Update capture status with capture count
-                        if (primaryCamera) statusService.updateStatus(source, `Capturing (${i + 1} of ${captures})`);
-                        else statusService.updateStatus(undefined, `Capturing (${i + 1} of ${captures})`);
-
-                        const singleCaptureStart = Date.now();
-                        const imagePath = await cameraService.captureImage(rtspUrl);
-                        const singleCaptureEnd = Date.now();
-                        const singleCaptureTime = (singleCaptureEnd - singleCaptureStart) / 1000;
-                        totalCaptureTime += singleCaptureTime;
-
-                        tempFiles.push(imagePath);
-
-                        if (i < captures - 1 && interval > 0) {
-                            if (primaryCamera) statusService.updateStatus(source, `Waiting for next capture (${i + 1} of ${captures})`);
-                            else statusService.updateStatus(undefined, `Waiting for next capture (${i + 1} of ${captures})`);
-                            await new Promise(r => setTimeout(r, interval));
-                        } else {
-                            // Mark individual capture completed
-                            if (primaryCamera) statusService.updateStatus(source, `Captured (${i + 1} of ${captures})`);
-                            else statusService.updateStatus(undefined, `Captured (${i + 1} of ${captures})`);
-                        }
-                    }
-
-                    const totalElapsedTime = (Date.now() - captureStartTime) / 1000;
-
-                    // Record camera capture metrics
-                    if (primaryCamera) {
-                        statusService.updateStats(primaryCamera, {
-                            loader: {
-                                camera: {
-                                    [source]: {
-                                        lastCaptureTime: totalCaptureTime / captures, // Average per capture
-                                        lastTotalCaptureTime: totalElapsedTime
-                                    }
-                                }
-                            }
-                        });
-                    }
-                } else if (loader.type === 'url') {
-                    const sourceUrl = loader.source;
-
-                    // Progress update for URL fetch with loader counts
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
-                    else statusService.updateStatus(undefined, `Fetching URL ${loaderNum} of ${loaderTotal}: ${sourceUrl}`);
-
-                    const urlStartTime = Date.now();
-                    const { tmpPath, httpCode, fileSize } = await downloadUrlToTempWithMetrics(sourceUrl);
-                    const urlElapsedTime = (Date.now() - urlStartTime) / 1000;
-
-                    tempFiles.push(tmpPath);
-
-                    // Record URL metrics
-                    if (primaryCamera) {
-                        const existingLoaderStats = statusService.getStats(primaryCamera).loader || {};
-                        const existingUrlStats = existingLoaderStats.url || {};
-                        statusService.updateStats(primaryCamera, {
-                            loader: {
-                                ...existingLoaderStats,
-                                url: {
-                                    ...existingUrlStats,
-                                    [loaderTypeIndex]: {
-                                        lastDownloadTime: urlElapsedTime,
-                                        lastHTTPCode: httpCode,
-                                        lastFileSize: fileSize
-                                    }
-                                }
-                            }
-                        });
-                    }
-
-                    // Mark URL fetch completed
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, `URL fetched (${loaderNum} of ${loaderTotal})`);
-                    else statusService.updateStatus(undefined, `URL fetched (${loaderNum} of ${loaderTotal})`);
-                } else if (loader.type === 'database') {
-                    const source = loader.source;
-                    const dbConfig = config.databases?.[source];
-                    if (!dbConfig) throw new Error(`Unknown database source: ${source}`);
-                    if (dbConfig.type !== 'mariadb') throw new Error(`Unsupported database type for ${source}: ${dbConfig.type}`);
-
-                    // Progress update for DB query (with loader counts)
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, `Querying DB ${loaderNum} of ${loaderTotal}: ${source}`);
-                    else statusService.updateStatus(undefined, `Querying DB ${loaderNum} of ${loaderTotal}: ${source}`);
-
-                    const query = loader.options?.query;
-
-                    if (!query) throw new Error(`Database loader for ${source} missing 'query' option`);
-
-                    const attach = loader.options?.attach || 'csv'; // 'csv' or 'inline'
-
-                    const mariadb = (await import('mariadb')).default || (await import('mariadb'));
-
-                    const conn = await mariadb.createConnection({
-                        host: dbConfig.server,
-                        port: dbConfig.port || 3306,
-                        user: dbConfig.username,
-                        password: dbConfig.password || (dbConfig.password_file ? fs.readFileSync(dbConfig.password_file, 'utf8').trim() : undefined),
-                        database: dbConfig.database,
-                    });
-
-                    try {
-                        const queryStartTime = Date.now();
-                        const rows = await conn.query(query);
-                        const queryElapsedTime = (Date.now() - queryStartTime) / 1000;
-
-                        // Ensure rows is an array of objects
-                        const resultRows = Array.isArray(rows) ? rows : [rows];
-                        const rowCount = resultRows.length;
-
-                        // Record database query metrics
-                        if (primaryCamera) {
-                            const existingLoaderStats = statusService.getStats(primaryCamera).loader || {};
-                            const existingDbStats = existingLoaderStats.database || {};
-                            const existingSourceStats = existingDbStats[source] || {};
-                            statusService.updateStats(primaryCamera, {
-                                loader: {
-                                    ...existingLoaderStats,
-                                    database: {
-                                        ...existingDbStats,
-                                        [source]: {
-                                            ...existingSourceStats,
-                                            [loaderTypeIndex]: {
-                                                lastQueryTime: queryElapsedTime,
-                                                lastQueryRows: rowCount
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        }
-
-                        if (attach === 'csv') {
-                            // Convert to CSV
-                            const csv = rowsToCsv(resultRows);
-                            const os = await import('os');
-                            const path = await import('path');
-                            const tmpName = `mqttai_db_${source}_${Date.now()}_${Math.round(Math.random() * 10000)}.csv`;
-                            const tmpPath = path.join(os.tmpdir(), tmpName);
-                            fs.writeFileSync(tmpPath, csv);
-                            tempFiles.push(tmpPath);
-                        } else { // inline
-                            promptText = `${promptText}\n\nDatabase ${source} query results:\n${rowsToCsv(resultRows)}`;
-                        }
-                    } finally {
-                        try { await conn.end(); } catch (e) { logger.warn(`Error closing DB connection: ${e}`); }
-                    }
-                } else if (loader.type === 'mqtt') {
-                    const source = loader.source;
-                    if (!source) throw new Error('MQTT loader requires a "source" topic');
-
-                    // Support relative topic names under basetopic
-                    const topic = source.startsWith(config.mqtt.basetopic) ? source : `${config.mqtt.basetopic}/${source}`;
-                    const timeout = loader.options?.timeout || 5000;
-                    const attach = loader.options?.attach || 'inline'; // 'inline', 'file', or 'image'
-
-                    logger.info(`Fetching MQTT topic '${topic}' for loader`);
-
-                    // Progress update for MQTT topic fetch
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching MQTT topic: ${topic}`);
-                    else statusService.updateStatus(undefined, `Fetching MQTT topic: ${topic}`);
-
-                    const { payload, isBinary } = await mqttService.fetchTopicMessage(topic, timeout);
-
-                    // Mark MQTT fetch completed
-                    if (primaryCamera) statusService.updateStatus(primaryCamera, 'MQTT topic fetched');
-                    else statusService.updateStatus(undefined, 'MQTT topic fetched');
-
-                    if (isBinary && Buffer.isBuffer(payload)) {
-                        const buf: Buffer = payload as Buffer;
-                        const mime = detectMime(buf);
-
-                        if (attach === 'inline') {
-                            // For binary payloads, inline as base64 text
-                            promptText = `${promptText}\n\nMQTT topic ${topic} returned binary data (base64): ${buf.toString('base64')}`;
-                        } else {
-                            // Write to temp file and attach
-                            const tmpPath = await writeBufferToTemp(buf, topic, mime);
-                            tempFiles.push(tmpPath);
-                        }
-                    } else {
-                        // treat as text
-                        const text = String(payload);
-                        if (attach === 'inline') {
-                            promptText = `${promptText}\n\nMQTT topic ${topic} contents:\n${text}`;
-                        } else {
-                            // write to tmp file
-                            const tmpPath = await writeBufferToTemp(Buffer.from(text, 'utf8'), topic, 'text/plain');
-                            tempFiles.push(tmpPath);
-                        }
-                    }
-                } else {
-                    logger.warn(`Unknown loader type: ${loader.type}`);
+                tempFiles.push(...loaderResult.files);
+                for (const addition of loaderResult.promptAdditions) {
+                    promptText = `${promptText}${addition}`;
                 }
             }
         }
@@ -1129,7 +891,7 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
         const aiTime = (aiEnd - aiStart) / 1000;
 
         // Build output object with structured JSON (if available) and model info
-        const structured = extractStructuredFromAiResponse(response, responseFormat);
+        const structured = extractStructuredFromAiResponseUtil(response, responseFormat);
 
         const out = {
             tag: payload.tag || '',
@@ -1230,8 +992,6 @@ function extractTextFromAiResponse(resp: any): string {
     }
 }
 
-function extractStructuredFromAiResponse(resp: any, responseFormat?: any): any { return extractStructuredFromAiResponseUtil(resp, responseFormat); }
-
 function rowsToCsv(rows: any[]): string {
     if (!rows || rows.length === 0) return '';
 
@@ -1245,30 +1005,6 @@ function rowsToCsv(rows: any[]): string {
 
     return [header, ...lines].join('\n');
 }
-
-/* function detectMimeFromBuffer(buf: Buffer): string | undefined {
-    if (!buf || buf.length < 4) return undefined;
-
-    // JPEG
-    if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-    // PNG
-    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
-    // GIF
-    if (buf.slice(0, 3).toString() === 'GIF') return 'image/gif';
-    // PDF
-    if (buf.slice(0, 4).toString() === '%PDF') return 'application/pdf';
-
-    // Heuristic: check if it's valid UTF-8 text
-    const text = buf.toString('utf8');
-    const nonPrintable = /[^
-
- -~]/.test(text);
-    if (!nonPrintable) return 'text/plain';
-
-    return undefined;
-}
-
-*/
 
 function detectMime(buf: Buffer): string | undefined {
     if (!buf || buf.length < 4) return undefined;
