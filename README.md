@@ -16,7 +16,7 @@ The MQTT AI Tool is a TypeScript/Node.js application that listens for JSON `INPU
 - **RTSP Camera Support**: Capture high-quality images using FFmpeg when requested by a loader.
 - **AI Backends**: Send attached files and prompts to configurable AI backends (OpenAI-compatible by default).
 - **Real-time progress & metrics**: Live processing updates are published to `<basetopic>/PROGRESS`; performance and historical metrics go to `<basetopic>/STATS`.
-- **Queue visibility**: `<basetopic>/QUEUED` publishes the current queue size (retained).
+- **Queue & activity visibility**: `<basetopic>/QUEUED` shows waiting tasks, `<basetopic>/RUNNING` shows tasks being processed, and `<basetopic>/IMMEDIATE` shows background immediate-loader activity. All retained.
 - **Graceful operation**: Automatic cleanup, LWT `ONLINE`/`OFFLINE` status on `<basetopic>/ONLINE`, and graceful shutdown handling.
 - **Docker-friendly**: Works well in containers and supports secret-mounted password files for credentials.
 - **Structured responses**: Optional JSON schema-based responses provide consistent outputs.
@@ -31,7 +31,9 @@ The application uses a simplified global topic set under the base topic:
 - **`<basetopic>/OUTPUT`** - Returns JSON objects with the AI result for each processed request (base `OUTPUT` is not retained; per-request runtime responses are published non‑retained).
 - **`<basetopic>/PROGRESS`** - Plain text status updates during processing (format: `"cameraName: status"` or just `"status"`). Retained.
 - **`<basetopic>/STATS`** - JSON object with performance and historical metrics (includes `camera` and `stats` fields). Retained.
-- **`<basetopic>/QUEUED`** - Plain text number indicating how many INPUT requests are queued. Retained.
+- **`<basetopic>/QUEUED`** - Plain text number indicating how many INPUT requests are waiting in the queue (does not include the currently processing task). Retained.
+- **`<basetopic>/RUNNING`** - Plain text number of tasks/prompts currently being processed, whether from the queue or bypassing it. Retained.
+- **`<basetopic>/IMMEDIATE`** - Plain text number of immediate loader sets running in the background for queued tasks. `0` means no immediate loaders are active. Retained.
 - **`<basetopic>/ONLINE`** - Indicates service status: `"YES"` when online, `"NO"` when offline (Last Will and Testament). Retained.
 
 ## Database configuration
@@ -478,7 +480,7 @@ The `/STATS` topic publishes a JSON object with performance metrics:
 5. **AI Processing**: Captured files and loader data are sent to the configured AI backend together with the resolved prompt.
 6. **Result Publishing**: AI outputs (structured object if available) are published to `<basetopic>/OUTPUT`.
 7. **Statistics Update**: Performance metrics (times and last success/error) are published to `<basetopic>/STATS`.
-8. **Queued / Reset**: There is no per-camera reset; the queue length is reflected on `<basetopic>/QUEUED` and completed requests are returned via `<basetopic>/OUTPUT`.
+8. **Queued / Reset**: There is no per-camera reset; `<basetopic>/QUEUED` reflects the number of waiting tasks, `<basetopic>/RUNNING` reflects how many are actively being processed, and `<basetopic>/IMMEDIATE` shows background immediate-loader activity. Completed requests are returned via `<basetopic>/OUTPUT`.
 9. **Cleanup**: All temporary files are deleted automatically after processing.
 
 ### Queue Bypass & Immediate Loaders
@@ -819,6 +821,8 @@ mosquitto_pub -h mqtt-server -t "mqttai/INPUT" -m '{"tag":"comprehensive-analysi
 ```bash
 mosquitto_sub -h mqtt-server -t "mqttai/OUTPUT" -v
 mosquitto_sub -h mqtt-server -t "mqttai/QUEUED" -v
+mosquitto_sub -h mqtt-server -t "mqttai/RUNNING" -v
+mosquitto_sub -h mqtt-server -t "mqttai/IMMEDIATE" -v
 mosquitto_sub -h mqtt-server -t "mqttai/STATS" -v
 mosquitto_sub -h mqtt-server -t "mqttai/PROGRESS" -v
 ```

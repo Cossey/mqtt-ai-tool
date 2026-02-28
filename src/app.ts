@@ -290,6 +290,10 @@ interface QueueEntry {
 const inputQueue: QueueEntry[] = [];
 let processing = false;
 
+// Counters for MQTT status topics
+let runningCount = 0;
+let immediateCount = 0;
+
 async function initialize() {
     try {
         logger.info('Starting MQTT AI Tool application...');
@@ -351,7 +355,7 @@ export function resolveTaskPayload(payload: any): { resolved: any; taskName?: st
     return { resolved, taskName };
 }
 
-function enqueueInput(payload: any) {
+export function enqueueInput(payload: any) {
     // Additional safety check: ignore empty or invalid payloads
     if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
         logger.debug('Skipping empty payload in enqueueInput');
@@ -382,7 +386,11 @@ function enqueueInput(payload: any) {
     if (!shouldQueue) {
         // Non-queued: process immediately, bypassing the queue
         logger.info(`Processing non-queued INPUT (tag="${payload.tag}") immediately`);
-        processPayload(payload).catch(err => logger.error(`Failed to process non-queued input: ${err}`));
+        runningCount++;
+        publishRunningCount();
+        processPayload(payload)
+            .catch(err => logger.error(`Failed to process non-queued input: ${err}`))
+            .finally(() => { runningCount--; publishRunningCount(); });
         return;
     }
 
@@ -394,7 +402,12 @@ function enqueueInput(payload: any) {
 
     if (hasImmediateLoaders) {
         logger.info(`Starting immediate loader processing for queued INPUT (tag="${payload.tag}")`);
-        entry.immediateFilesPromise = processImmediateLoaders(payload);
+        immediateCount++;
+        publishImmediateCount();
+        entry.immediateFilesPromise = processImmediateLoaders(payload).finally(() => {
+            immediateCount--;
+            publishImmediateCount();
+        });
     }
 
     inputQueue.push(entry);
@@ -405,8 +418,15 @@ function enqueueInput(payload: any) {
 }
 
 function publishQueueCount() {
-    const count = inputQueue.length;
-    mqttService.publish(`${config.mqtt.basetopic}/QUEUED`, String(count), true);
+    mqttService.publish(`${config.mqtt.basetopic}/QUEUED`, String(inputQueue.length), true);
+}
+
+function publishRunningCount() {
+    mqttService.publish(`${config.mqtt.basetopic}/RUNNING`, String(runningCount), true);
+}
+
+function publishImmediateCount() {
+    mqttService.publish(`${config.mqtt.basetopic}/IMMEDIATE`, String(immediateCount), true);
 }
 
 /**
@@ -939,14 +959,17 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
 async function processNextInput() {
     if (inputQueue.length === 0) {
         processing = false;
-        publishQueueCount();
         return;
     }
 
     processing = true;
-    publishQueueCount();
 
     const entry = inputQueue.shift()!;
+    publishQueueCount(); // publish after shift so QUEUED only reflects waiting tasks
+
+    runningCount++;
+    publishRunningCount();
+
     const payload = entry.payload;
     logger.info(`Processing INPUT payload with tag="${payload?.tag}"`);
 
@@ -965,7 +988,8 @@ async function processNextInput() {
     } finally {
         // Continue with next input
         processing = false;
-        publishQueueCount();
+        runningCount--;
+        publishRunningCount();
         // Trigger next
         setImmediate(() => processNextInput());
     }
@@ -1061,8 +1085,10 @@ async function gracefulShutdown(signal: string) {
     logger.info(`Received ${signal}, shutting down gracefully...`);
 
     try {
-        // Reset PROGRESS to Idle before disconnecting so it doesn't linger with a camera name
+        // Reset status topics before disconnecting so they don't linger
         mqttService.publish(`${config.mqtt.basetopic}/PROGRESS`, 'Offline', true);
+        mqttService.publish(`${config.mqtt.basetopic}/RUNNING`, '0', true);
+        mqttService.publish(`${config.mqtt.basetopic}/IMMEDIATE`, '0', true);
 
         mqttService.gracefulShutdown();
 

@@ -67,7 +67,11 @@ export class MqttService extends EventEmitter {
 
                 // Initialize status topics
                 const queuedTopic = `${this.config.basetopic}/QUEUED`;
+                const runningTopic = `${this.config.basetopic}/RUNNING`;
+                const immediateTopic = `${this.config.basetopic}/IMMEDIATE`;
                 this.publish(queuedTopic, '0', true);
+                this.publish(runningTopic, '0', true);
+                this.publish(immediateTopic, '0', true);
 
                 this.emit('connected');
             });
@@ -290,6 +294,8 @@ export class MqttService extends EventEmitter {
         const statsTopic = `${this.config.basetopic}/STATS`;
         const progressTopic = `${this.config.basetopic}/PROGRESS`;
         const queuedTopic = `${this.config.basetopic}/QUEUED`;
+        const runningTopic = `${this.config.basetopic}/RUNNING`;
+        const immediateTopic = `${this.config.basetopic}/IMMEDIATE`;
 
         // Initialize retained base topics
         this.publish(inputTopic, JSON.stringify({}), true);
@@ -298,6 +304,8 @@ export class MqttService extends EventEmitter {
         // PROGRESS is plain text; initialize with a generic Idle message
         this.publish(progressTopic, 'Idle', true);
         this.publish(queuedTopic, '0', true);
+        this.publish(runningTopic, '0', true);
+        this.publish(immediateTopic, '0', true);
 
         logger.info('Base channel initialization complete');
     }

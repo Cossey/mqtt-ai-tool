@@ -272,3 +272,150 @@ describe('Immediate loader processing', () => {
         expect(filesArg.length).toBe(3);
     });
 });
+
+describe('MQTT status topics (QUEUED, RUNNING, IMMEDIATE)', () => {
+    test('non-queued task publishes RUNNING incremented then decremented', async () => {
+        const publishCalls: Array<[string, string, boolean]> = [];
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+        const camOverrides = {
+            captureImage: jest.fn().mockResolvedValue('/tmp/fake.jpg'),
+            cleanupImageFiles: jest.fn().mockResolvedValue(undefined),
+        };
+        const mqttOverrides = {
+            publish: jest.fn((...args: any[]) => publishCalls.push(args as any)),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const { app, config } = await importAppWithMocks({ ai: aiOverrides, camera: camOverrides, mqtt: mqttOverrides });
+
+        // Create a non-queued task
+        if (!config.tasks) (config as any).tasks = {} as any;
+        config.tasks!['unqueued_task'] = {
+            ai: Object.keys(config.ai)[0],
+            queue: false,
+            prompt: { text: 'Fast check' },
+        } as any;
+
+        // Use enqueueInput which handles the queue bypass and publishes RUNNING
+        app.enqueueInput({ task: 'unqueued_task', tag: 'run-test' });
+
+        // Wait for the non-queued processPayload to complete
+        await new Promise(r => setTimeout(r, 200));
+
+        const runningCalls = publishCalls.filter(c => typeof c[0] === 'string' && c[0].endsWith('/RUNNING'));
+
+        // Should have at least an increment (1) and then a decrement (0)
+        expect(runningCalls.length).toBeGreaterThanOrEqual(2);
+        expect(runningCalls[0][1]).toBe('1');
+        expect(runningCalls[runningCalls.length - 1][1]).toBe('0');
+
+        // QUEUED should NOT have been incremented (non-queued task)
+        const queuedCalls = publishCalls.filter(c => typeof c[0] === 'string' && c[0].endsWith('/QUEUED'));
+        for (const call of queuedCalls) {
+            expect(call[1]).toBe('0');
+        }
+    });
+
+    test('queued task publishes QUEUED then RUNNING during processing', async () => {
+        let resolveAi: () => void;
+        const aiPromise = new Promise<void>(r => { resolveAi = r; });
+        const publishCalls: Array<[string, string, boolean]> = [];
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockImplementation(async () => {
+                await aiPromise;
+                return { choices: [{ message: { content: 'ok' } }] };
+            }),
+        };
+        const camOverrides = {
+            captureImage: jest.fn().mockResolvedValue('/tmp/fake.jpg'),
+            cleanupImageFiles: jest.fn().mockResolvedValue(undefined),
+        };
+        const mqttOverrides = {
+            publish: jest.fn((...args: any[]) => publishCalls.push(args as any)),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const { app } = await importAppWithMocks({ ai: aiOverrides, camera: camOverrides, mqtt: mqttOverrides });
+
+        // Enqueue a normal (queued) task
+        app.enqueueInput({ tag: 'queued-test', prompt: { text: 'Analyze' } });
+
+        // Let processNextInput start
+        await new Promise(r => setTimeout(r, 50));
+
+        // At this point the task has been dequeued and is running
+        const queuedCalls = publishCalls.filter(c => typeof c[0] === 'string' && c[0].endsWith('/QUEUED'));
+        const runningCalls = publishCalls.filter(c => typeof c[0] === 'string' && c[0].endsWith('/RUNNING'));
+
+        // QUEUED should have been 1 initially (on enqueue), then 0 after shift
+        expect(queuedCalls.some(c => c[1] === '1')).toBe(true);
+        expect(queuedCalls.some(c => c[1] === '0')).toBe(true);
+
+        // RUNNING should be 1 while processing
+        expect(runningCalls.some(c => c[1] === '1')).toBe(true);
+
+        // Complete the AI call
+        resolveAi!();
+        await new Promise(r => setTimeout(r, 100));
+
+        // RUNNING should be back to 0
+        const finalRunning = publishCalls.filter(c => typeof c[0] === 'string' && c[0].endsWith('/RUNNING'));
+        expect(finalRunning[finalRunning.length - 1][1]).toBe('0');
+    });
+
+    test('immediate loaders publish IMMEDIATE count', async () => {
+        let resolveLoader: () => void;
+        const loaderPromise = new Promise<void>(r => { resolveLoader = r; });
+        const publishCalls: Array<[string, string, boolean]> = [];
+        const camOverrides = {
+            captureImage: jest.fn().mockImplementation(async () => {
+                await loaderPromise;
+                return '/tmp/fake.jpg';
+            }),
+            cleanupImageFiles: jest.fn().mockResolvedValue(undefined),
+        };
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+        const mqttOverrides = {
+            publish: jest.fn((...args: any[]) => publishCalls.push(args as any)),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const { app, config } = await importAppWithMocks({ ai: aiOverrides, camera: camOverrides, mqtt: mqttOverrides });
+
+        // Create a queued task with an immediate loader
+        if (!config.tasks) (config as any).tasks = {} as any;
+        config.tasks!['imm_task'] = {
+            ai: Object.keys(config.ai)[0],
+            prompt: {
+                text: 'Check camera',
+                loader: [
+                    { type: 'camera', source: Object.keys(config.cameras)[0], immediate: true, options: { captures: 1, interval: 0 } },
+                ],
+            },
+        } as any;
+
+        app.enqueueInput({ task: 'imm_task', tag: 'imm-test' });
+
+        // Let the immediate loader start
+        await new Promise(r => setTimeout(r, 50));
+
+        // IMMEDIATE should have been published as 1
+        const immCalls = publishCalls.filter(c => typeof c[0] === 'string' && c[0].endsWith('/IMMEDIATE'));
+        expect(immCalls.some(c => c[1] === '1')).toBe(true);
+
+        // Complete the loader
+        resolveLoader!();
+        await new Promise(r => setTimeout(r, 200));
+
+        // IMMEDIATE should be back to 0
+        const finalImm = publishCalls.filter(c => typeof c[0] === 'string' && c[0].endsWith('/IMMEDIATE'));
+        expect(finalImm[finalImm.length - 1][1]).toBe('0');
+    });
+});

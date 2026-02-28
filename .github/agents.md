@@ -86,7 +86,9 @@ All topics are under `config.mqtt.basetopic`:
 - `OUTPUT` / `OUTPUT/<topic>` — AI results (non-retained)
 - `PROGRESS` / `PROGRESS/<topic>` — status updates (retained)
 - `STATS` / `STATS/<topic>` — performance metrics (retained)
-- `QUEUED` — current queue depth (retained)
+- `QUEUED` — number of tasks waiting in the queue, does not include the currently processing task (retained)
+- `RUNNING` — number of tasks/prompts currently being processed, whether queued or unqueued (retained)
+- `IMMEDIATE` — number of immediate loader sets running in the background for queued tasks; 0 = none active (retained)
 - `ONLINE` — LWT online/offline status (retained)
 
 ### Home Assistant Discovery
