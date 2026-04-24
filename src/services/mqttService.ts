@@ -16,7 +16,7 @@ export class MqttService extends EventEmitter {
         this.config = config;
         logger.info('Initializing MQTT service...');
         logger.debug(`Base topic configured as: "${this.config.basetopic}"`);
-        logger.debug(`Expected topic structure: ${this.config.basetopic}/<SUBTOPIC> (INPUT/OUTPUT/STATS/QUEUED)`);
+        logger.debug(`Expected topic structure: ${this.config.basetopic}/<SUBTOPIC> (INPUT/CONTROL/OUTPUT/STATS/QUEUED/RUNNING/IMMEDIATE/PAUSE)`);
         this.initializeConnection();
     }
 
@@ -65,13 +65,20 @@ export class MqttService extends EventEmitter {
                 logger.debug(`Subscribing to input topic: "${inputTopic}"`);
                 this.subscribe(inputTopic);
 
+                // Subscribe to the control topic for queue/control commands
+                const controlTopic = `${this.config.basetopic}/CONTROL`;
+                logger.debug(`Subscribing to control topic: "${controlTopic}"`);
+                this.subscribe(controlTopic);
+
                 // Initialize status topics
                 const queuedTopic = `${this.config.basetopic}/QUEUED`;
                 const runningTopic = `${this.config.basetopic}/RUNNING`;
                 const immediateTopic = `${this.config.basetopic}/IMMEDIATE`;
+                const pauseTopic = `${this.config.basetopic}/PAUSE`;
                 this.publish(queuedTopic, '0', true);
                 this.publish(runningTopic, '0', true);
                 this.publish(immediateTopic, '0', true);
+                this.publish(pauseTopic, '0', true);
 
                 this.emit('connected');
             });
@@ -89,14 +96,15 @@ export class MqttService extends EventEmitter {
                 logger.error(`MQTT connection issue: ${error.message}. Retrying...`);
             });
 
-            this.client.on('message', (topic: string, message: unknown) => {
+            this.client.on('message', (topic: string, message: unknown, packet: any) => {
+                const isRetained = !!packet?.retain;
                 // Log binary payloads generically; no per-camera image topics are assumed anymore
                 if (Buffer.isBuffer(message)) {
                     logger.debug(`Received MQTT message - Topic: "${topic}", Binary data: ${message.length} bytes`);
-                    this.handleMessage(topic, message.toString());
+                    this.handleMessage(topic, message.toString(), false, isRetained);
                 } else {
                     logger.debug(`Received MQTT message - Topic: "${topic}", Message: "${String(message)}"`);
-                    this.handleMessage(topic, String(message));
+                    this.handleMessage(topic, String(message), false, isRetained);
                 }
             });
         } catch (error) {
@@ -106,7 +114,7 @@ export class MqttService extends EventEmitter {
     }
 
 
-    private handleMessage(topic: string, message: string, isBinaryTopic: boolean = false) {
+    private handleMessage(topic: string, message: string, isBinaryTopic: boolean = false, isRetained: boolean = false) {
         // No per-camera binary/image topic handling — all inputs come via the global INPUT topic
         if (isBinaryTopic) {
             logger.debug(`Ignoring binary image topic: "${topic}"`);
@@ -146,6 +154,24 @@ export class MqttService extends EventEmitter {
             } catch (error) {
                 logger.error(`Failed to parse INPUT payload as JSON: ${error}`);
             }
+            return;
+        }
+
+        if (targetTopic === 'CONTROL') {
+            logger.info('Received CONTROL message');
+
+            // Retained control messages can replay stale commands after reconnect; ignore them.
+            if (isRetained) {
+                logger.debug('Ignoring retained CONTROL payload');
+                return;
+            }
+
+            if (!message || message.trim().length === 0) {
+                logger.debug('Ignoring empty CONTROL payload');
+                return;
+            }
+
+            this.emit('control', message);
             return;
         }
 
@@ -296,6 +322,7 @@ export class MqttService extends EventEmitter {
         const queuedTopic = `${this.config.basetopic}/QUEUED`;
         const runningTopic = `${this.config.basetopic}/RUNNING`;
         const immediateTopic = `${this.config.basetopic}/IMMEDIATE`;
+        const pauseTopic = `${this.config.basetopic}/PAUSE`;
 
         // Initialize retained base topics
         this.publish(inputTopic, JSON.stringify({}), true);
@@ -306,6 +333,7 @@ export class MqttService extends EventEmitter {
         this.publish(queuedTopic, '0', true);
         this.publish(runningTopic, '0', true);
         this.publish(immediateTopic, '0', true);
+        this.publish(pauseTopic, '0', true);
 
         logger.info('Base channel initialization complete');
     }

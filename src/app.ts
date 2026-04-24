@@ -286,6 +286,13 @@ interface QueueEntry {
     immediateFilesPromise?: Promise<ImmediateLoaderResult>;
 }
 
+interface ControlCommand {
+    cmd: 'pause' | 'resume' | 'cancel';
+    param?: 'all' | 'index' | 'tag' | 'task' | 'immediate';
+    name?: string[];
+    value?: number;
+}
+
 // Input queue for sequential processing
 const inputQueue: QueueEntry[] = [];
 let processing = false;
@@ -293,6 +300,12 @@ let processing = false;
 // Counters for MQTT status topics
 let runningCount = 0;
 let immediateCount = 0;
+
+// Control/pause state
+let dequeuePaused = false;
+let immediateStartPaused = false;
+let pauseValue = 0; // -1: paused indefinitely, 0: unpaused, >0: seconds remaining
+let pauseCountdownTimer: NodeJS.Timeout | null = null;
 
 async function initialize() {
     try {
@@ -313,6 +326,10 @@ async function initialize() {
         mqttService.on('input', (payload: any) => {
             logger.info('New INPUT received, enqueueing');
             enqueueInput(payload);
+        });
+
+        mqttService.on('control', (message: string) => {
+            handleControlMessage(message);
         });
 
         logger.info('Application initialization complete, waiting for MQTT connection...');
@@ -400,7 +417,7 @@ export function enqueueInput(payload: any) {
 
     const entry: QueueEntry = { payload };
 
-    if (hasImmediateLoaders) {
+    if (hasImmediateLoaders && !immediateStartPaused) {
         logger.info(`Starting immediate loader processing for queued INPUT (tag="${payload.tag}")`);
         immediateCount++;
         publishImmediateCount();
@@ -408,6 +425,8 @@ export function enqueueInput(payload: any) {
             immediateCount--;
             publishImmediateCount();
         });
+    } else if (hasImmediateLoaders && immediateStartPaused) {
+        logger.debug(`Immediate loader start is paused; skipping pre-processing for tag="${payload.tag}"`);
     }
 
     inputQueue.push(entry);
@@ -427,6 +446,284 @@ function publishRunningCount() {
 
 function publishImmediateCount() {
     mqttService.publish(`${config.mqtt.basetopic}/IMMEDIATE`, String(immediateCount), true);
+}
+
+function publishPauseValue() {
+    mqttService.publish(`${config.mqtt.basetopic}/PAUSE`, String(pauseValue), true);
+}
+
+function clearPauseCountdownTimer() {
+    if (pauseCountdownTimer) {
+        clearInterval(pauseCountdownTimer);
+        pauseCountdownTimer = null;
+    }
+}
+
+function resumeProcessingFromPause() {
+    clearPauseCountdownTimer();
+    dequeuePaused = false;
+    immediateStartPaused = false;
+    pauseValue = 0;
+    publishPauseValue();
+
+    if (!processing && inputQueue.length > 0) {
+        processNextInput().catch(err => logger.error(`Failed to process next input after resume: ${err}`));
+    }
+}
+
+function applyPause(seconds: number | undefined, pauseImmediate: boolean) {
+    clearPauseCountdownTimer();
+
+    dequeuePaused = true;
+    immediateStartPaused = pauseImmediate;
+
+    if (seconds === undefined) {
+        pauseValue = -1;
+        publishPauseValue();
+        return;
+    }
+
+    pauseValue = seconds;
+    publishPauseValue();
+
+    pauseCountdownTimer = setInterval(() => {
+        if (pauseValue <= 1) {
+            resumeProcessingFromPause();
+            return;
+        }
+
+        pauseValue -= 1;
+        publishPauseValue();
+    }, 1000);
+}
+
+function parsePositiveInteger(value: unknown): number | undefined {
+    if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+        return value;
+    }
+
+    if (typeof value === 'string') {
+        if (!/^[0-9]+$/.test(value)) return undefined;
+        const parsed = Number(value);
+        if (Number.isInteger(parsed) && parsed > 0) return parsed;
+    }
+
+    return undefined;
+}
+
+function normalizeNameList(value: unknown): string[] {
+    if (typeof value === 'string') {
+        return value.length > 0 ? [value] : [];
+    }
+
+    if (Array.isArray(value)) {
+        return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+    }
+
+    return [];
+}
+
+function parseJsonControlCommand(payload: unknown): ControlCommand | null {
+    if (!payload || typeof payload !== 'object') return null;
+
+    const obj = payload as Record<string, unknown>;
+    const cmdRaw = typeof obj.cmd === 'string' ? obj.cmd.toLowerCase() : '';
+    const paramRaw = typeof obj.param === 'string' ? obj.param.toLowerCase() : undefined;
+    const names = normalizeNameList(obj.name);
+    const value = parsePositiveInteger(obj.value);
+
+    if (cmdRaw === 'clear') {
+        return { cmd: 'cancel', param: 'all' };
+    }
+
+    if (cmdRaw === 'resume') {
+        return { cmd: 'resume' };
+    }
+
+    if (cmdRaw === 'pause') {
+        if (paramRaw !== undefined && paramRaw !== 'immediate') return null;
+        if (obj.value !== undefined && value === undefined) return null;
+
+        return {
+            cmd: 'pause',
+            param: paramRaw as ControlCommand['param'] | undefined,
+            value,
+        };
+    }
+
+    if (cmdRaw === 'cancel') {
+        if (!paramRaw) return null;
+
+        if (paramRaw === 'all') {
+            return { cmd: 'cancel', param: 'all' };
+        }
+
+        if (paramRaw === 'index') {
+            if (value === undefined) return null;
+            return { cmd: 'cancel', param: 'index', value };
+        }
+
+        if (paramRaw === 'tag' || paramRaw === 'task') {
+            if (names.length === 0) return null;
+            return {
+                cmd: 'cancel',
+                param: paramRaw,
+                name: names,
+            };
+        }
+
+        return null;
+    }
+
+    return null;
+}
+
+function parseTextControlCommand(rawMessage: string): ControlCommand | null {
+    const trimmed = rawMessage.trim();
+    if (!trimmed) return null;
+
+    const tokens = trimmed.split(/\s+/);
+    const cmd = tokens[0].toLowerCase();
+
+    if (cmd === 'resume') {
+        return tokens.length === 1 ? { cmd: 'resume' } : null;
+    }
+
+    if (cmd === 'clear') {
+        return tokens.length === 1 ? { cmd: 'cancel', param: 'all' } : null;
+    }
+
+    if (cmd === 'pause') {
+        if (tokens.length === 1) return { cmd: 'pause' };
+
+        if (tokens.length === 2) {
+            if (tokens[1].toLowerCase() === 'immediate') {
+                return { cmd: 'pause', param: 'immediate' };
+            }
+
+            const seconds = parsePositiveInteger(tokens[1]);
+            return seconds !== undefined ? { cmd: 'pause', value: seconds } : null;
+        }
+
+        if (tokens.length === 3) {
+            const seconds = parsePositiveInteger(tokens[1]);
+            if (seconds !== undefined && tokens[2].toLowerCase() === 'immediate') {
+                return { cmd: 'pause', value: seconds, param: 'immediate' };
+            }
+        }
+
+        return null;
+    }
+
+    if (cmd === 'cancel') {
+        if (tokens.length === 2 && tokens[1].toLowerCase() === 'all') {
+            return { cmd: 'cancel', param: 'all' };
+        }
+
+        if (tokens.length === 3) {
+            const selector = tokens[1].toLowerCase();
+            if (selector === 'index') {
+                const index = parsePositiveInteger(tokens[2]);
+                return index !== undefined ? { cmd: 'cancel', param: 'index', value: index } : null;
+            }
+
+            if (selector === 'tag') {
+                return { cmd: 'cancel', param: 'tag', name: [tokens[2]] };
+            }
+
+            if (selector === 'task') {
+                return { cmd: 'cancel', param: 'task', name: [tokens[2]] };
+            }
+        }
+
+        return null;
+    }
+
+    return null;
+}
+
+export function parseControlMessage(rawMessage: string): ControlCommand | null {
+    const trimmed = rawMessage.trim();
+    if (!trimmed) return null;
+
+    try {
+        const parsed = JSON.parse(trimmed);
+        const cmd = parseJsonControlCommand(parsed);
+        if (cmd) return cmd;
+    } catch {
+        // If it's not JSON, fall back to text command parsing.
+    }
+
+    return parseTextControlCommand(trimmed);
+}
+
+function scheduleCanceledImmediateCleanup(entry: QueueEntry) {
+    if (!entry.immediateFilesPromise) return;
+
+    entry.immediateFilesPromise
+        .then(async (result) => {
+            if (result.files.length > 0) {
+                await cameraService.cleanupImageFiles(result.files);
+            }
+        })
+        .catch((err) => {
+            logger.debug(`Immediate loader cleanup skipped due to error after cancel: ${err}`);
+        });
+}
+
+function applyCancelCommand(command: ControlCommand) {
+    const removedEntries: QueueEntry[] = [];
+
+    if (command.param === 'all') {
+        removedEntries.push(...inputQueue.splice(0, inputQueue.length));
+    } else if (command.param === 'index' && command.value !== undefined) {
+        const idx = command.value - 1;
+        if (idx >= 0 && idx < inputQueue.length) {
+            const [removed] = inputQueue.splice(idx, 1);
+            if (removed) removedEntries.push(removed);
+        }
+    } else if ((command.param === 'tag' || command.param === 'task') && command.name && command.name.length > 0) {
+        const nameSet = new Set(command.name);
+        for (let i = inputQueue.length - 1; i >= 0; i--) {
+            const entry = inputQueue[i];
+            const probe = command.param === 'tag' ? entry.payload?.tag : entry.payload?.task;
+            if (typeof probe === 'string' && nameSet.has(probe)) {
+                const [removed] = inputQueue.splice(i, 1);
+                if (removed) removedEntries.push(removed);
+            }
+        }
+    }
+
+    if (removedEntries.length === 0) return;
+
+    for (const entry of removedEntries) {
+        scheduleCanceledImmediateCleanup(entry);
+    }
+
+    publishQueueCount();
+}
+
+export function handleControlMessage(rawMessage: string) {
+    const command = parseControlMessage(rawMessage);
+    if (!command) {
+        logger.debug(`Ignoring unsupported control message: ${rawMessage}`);
+        return;
+    }
+
+    if (command.cmd === 'resume') {
+        resumeProcessingFromPause();
+        return;
+    }
+
+    if (command.cmd === 'pause') {
+        const pauseImmediate = command.param === 'immediate';
+        applyPause(command.value, pauseImmediate);
+        return;
+    }
+
+    if (command.cmd === 'cancel') {
+        applyCancelCommand(command);
+    }
 }
 
 /**
@@ -957,6 +1254,11 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
 }
 
 async function processNextInput() {
+    if (dequeuePaused) {
+        processing = false;
+        return;
+    }
+
     if (inputQueue.length === 0) {
         processing = false;
         return;
@@ -1085,10 +1387,13 @@ async function gracefulShutdown(signal: string) {
     logger.info(`Received ${signal}, shutting down gracefully...`);
 
     try {
+        clearPauseCountdownTimer();
+
         // Reset status topics before disconnecting so they don't linger
         mqttService.publish(`${config.mqtt.basetopic}/PROGRESS`, 'Offline', true);
         mqttService.publish(`${config.mqtt.basetopic}/RUNNING`, '0', true);
         mqttService.publish(`${config.mqtt.basetopic}/IMMEDIATE`, '0', true);
+        mqttService.publish(`${config.mqtt.basetopic}/PAUSE`, '0', true);
 
         mqttService.gracefulShutdown();
 
