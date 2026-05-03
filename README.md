@@ -13,7 +13,7 @@ Key capabilities:
 - Immediate loaders (`immediate: true`) for early data capture while queued.
 - Reusable task templates in `config.yaml`.
 - Plain-text `PROGRESS` and JSON `STATS` telemetry.
-- Queue control via `CONTROL` (pause/resume/cancel/clear).
+- Queue control via `CONTROL` (pause/resume/cancel/clear/reload).
 - Pause state exposure via retained integer `PAUSE` topic.
 - Optional Home Assistant/OpenHAB MQTT discovery (`ha: true` per task).
 
@@ -72,6 +72,7 @@ cancel all
 cancel index 1
 cancel tag sec-frontdoor
 cancel task garage_check
+reload
 ```
 
 ### JSON Commands
@@ -87,6 +88,7 @@ cancel task garage_check
 { "cmd": "cancel", "param": "tag", "name": "front door" }
 { "cmd": "cancel", "param": "tag", "name": ["front door", "garage"] }
 { "cmd": "cancel", "param": "task", "name": "garage_check" }
+{ "cmd": "reload" }
 ```
 
 Control semantics:
@@ -96,6 +98,28 @@ Control semantics:
 - `pause immediate` pauses dequeue and blocks new immediate-loader starts.
 - `resume` unpauses both dequeue and immediate-loader starts.
 - In-flight immediate work is not hard-killed in v1; canceled queued entries are removed and immediate temp artifacts are cleaned up when that work returns.
+
+## Runtime Config Reload
+
+The service supports runtime config reload from three trigger paths:
+
+- Process signal: `SIGHUP`
+- MQTT control command: text `reload` on `<basetopic>/CONTROL`
+- MQTT control command: JSON `{ "cmd": "reload" }` on `<basetopic>/CONTROL`
+
+Optional file-change reload can be enabled by setting environment variable `MQTT_AI_CONFIG_RELOAD=true`.
+When enabled, the config file is watched and reload attempts are debounced (about 1.5s).
+
+Reload behavior:
+
+- Reload waits for active processing to finish before applying changes.
+- On validation failure, current runtime config stays active and the service keeps running.
+- Home Assistant discovery is republished after successful reload.
+
+Runtime reload scope and limits:
+
+- Most config sections can be reloaded at runtime (AI backends, prompts, tasks, cameras, databases, and non-connection MQTT fields such as `homeassistant`).
+- MQTT connection settings cannot be changed at runtime and require process restart: `server`, `port`, `basetopic`, `username`, `password`, `password_file`, `client`.
 
 ## INPUT Request Format
 

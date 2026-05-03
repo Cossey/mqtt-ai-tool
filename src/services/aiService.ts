@@ -11,6 +11,11 @@ export class AiService {
         logger.debug(`AI Service initialized with backends: ${Object.keys(aiBackends).join(', ')}`);
     }
 
+    public updateBackends(aiBackends: Record<string, AiConfig>) {
+        this.aiBackends = aiBackends;
+        logger.info(`AI backends refreshed: ${Object.keys(aiBackends).join(', ')}`);
+    }
+
     private getBackendConfig(aiName: string): AiConfig {
         const cfg = this.aiBackends[aiName];
         if (!cfg) throw new Error(`AI backend not found: ${aiName}`);

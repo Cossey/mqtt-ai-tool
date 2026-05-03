@@ -2,7 +2,7 @@ import { MqttService } from './services/mqttService';
 import { CameraService } from './services/cameraService';
 import { AiService } from './services/aiService';
 import { StatusService } from './services/statusService';
-import { config } from './config/config';
+import { config, loadConfigForRuntimeReload, applyConfigInPlace, resolveConfigPath } from './config/config';
 import { logger } from './utils/logger';
 import fs from 'fs';
 import { composeTemplateChain, sanitizeOutgoingTopic as sanitizeTopic, extractStructuredFromAiResponse as extractStructuredFromAiResponseUtil, buildJsonSchema as buildJsonSchemaUtil } from './utils/promptUtils';
@@ -287,7 +287,7 @@ interface QueueEntry {
 }
 
 interface ControlCommand {
-    cmd: 'pause' | 'resume' | 'cancel';
+    cmd: 'pause' | 'resume' | 'cancel' | 'reload';
     param?: 'all' | 'index' | 'tag' | 'task' | 'immediate';
     name?: string[];
     value?: number;
@@ -306,6 +306,15 @@ let dequeuePaused = false;
 let immediateStartPaused = false;
 let pauseValue = 0; // -1: paused indefinitely, 0: unpaused, >0: seconds remaining
 let pauseCountdownTimer: NodeJS.Timeout | null = null;
+
+// Runtime config reload state
+const CONFIG_RELOAD_DEBOUNCE_MS = 1500;
+let reloadPauseActive = false;
+let reloadInProgress = false;
+let reloadPending = false;
+let reloadDebounceTimer: NodeJS.Timeout | null = null;
+let configWatcher: fs.FSWatcher | null = null;
+let watchedConfigPath: string | null = null;
 
 async function initialize() {
     try {
@@ -331,6 +340,8 @@ async function initialize() {
         mqttService.on('control', (message: string) => {
             handleControlMessage(message);
         });
+
+        ensureConfigReloadWatcher();
 
         logger.info('Application initialization complete, waiting for MQTT connection...');
     } catch (error) {
@@ -417,7 +428,7 @@ export function enqueueInput(payload: any) {
 
     const entry: QueueEntry = { payload };
 
-    if (hasImmediateLoaders && !immediateStartPaused) {
+    if (hasImmediateLoaders && !immediateStartPaused && !reloadPauseActive) {
         logger.info(`Starting immediate loader processing for queued INPUT (tag="${payload.tag}")`);
         immediateCount++;
         publishImmediateCount();
@@ -575,6 +586,11 @@ function parseJsonControlCommand(payload: unknown): ControlCommand | null {
         return null;
     }
 
+    if (cmdRaw === 'reload') {
+        if (obj.param !== undefined || obj.value !== undefined || obj.name !== undefined) return null;
+        return { cmd: 'reload' };
+    }
+
     return null;
 }
 
@@ -637,6 +653,10 @@ function parseTextControlCommand(rawMessage: string): ControlCommand | null {
         }
 
         return null;
+    }
+
+    if (cmd === 'reload') {
+        return tokens.length === 1 ? { cmd: 'reload' } : null;
     }
 
     return null;
@@ -703,6 +723,133 @@ function applyCancelCommand(command: ControlCommand) {
     publishQueueCount();
 }
 
+function isConfigReloadWatchEnabled(): boolean {
+    return String(process.env.MQTT_AI_CONFIG_RELOAD || '').toLowerCase() === 'true';
+}
+
+function clearReloadDebounceTimer() {
+    if (reloadDebounceTimer) {
+        clearTimeout(reloadDebounceTimer);
+        reloadDebounceTimer = null;
+    }
+}
+
+function closeConfigReloadWatcher() {
+    if (configWatcher) {
+        try {
+            configWatcher.close();
+        } catch (err) {
+            logger.warn(`Error closing config watcher: ${err}`);
+        }
+    }
+
+    configWatcher = null;
+    watchedConfigPath = null;
+}
+
+function ensureConfigReloadWatcher(configPath?: string) {
+    if (!isConfigReloadWatchEnabled()) {
+        clearReloadDebounceTimer();
+        closeConfigReloadWatcher();
+        return;
+    }
+
+    const nextPath = configPath || resolveConfigPath();
+    if (configWatcher && watchedConfigPath === nextPath) {
+        return;
+    }
+
+    clearReloadDebounceTimer();
+    closeConfigReloadWatcher();
+
+    try {
+        configWatcher = fs.watch(nextPath, (eventType) => {
+            if (eventType !== 'change' && eventType !== 'rename') return;
+
+            logger.info(`Config file change detected (${eventType}), scheduling runtime reload`);
+            clearReloadDebounceTimer();
+            reloadDebounceTimer = setTimeout(() => {
+                reloadDebounceTimer = null;
+                requestConfigReload('CONFIG_FILE_CHANGE');
+            }, CONFIG_RELOAD_DEBOUNCE_MS);
+        });
+
+        watchedConfigPath = nextPath;
+        logger.info(`Config file watcher enabled: ${nextPath}`);
+    } catch (err) {
+        logger.error(`Failed to start config file watcher on ${nextPath}: ${err}`);
+    }
+}
+
+async function waitForActiveProcessingToDrain() {
+    while (processing || runningCount > 0 || immediateCount > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+}
+
+function resumeAfterReloadPause() {
+    reloadPauseActive = false;
+
+    if (!processing && !dequeuePaused && inputQueue.length > 0) {
+        processNextInput().catch(err => logger.error(`Failed to process next input after config reload: ${err}`));
+    }
+}
+
+async function executeConfigReload(source: string) {
+    logger.info(`Config reload requested via ${source}`);
+    reloadPauseActive = true;
+
+    try {
+        await waitForActiveProcessingToDrain();
+
+        const reloadResult = loadConfigForRuntimeReload(config);
+        if (!reloadResult.success || !reloadResult.config) {
+            logger.warn(`Config reload failed (${source}): ${reloadResult.error || 'Unknown error'}`);
+            return;
+        }
+
+        applyConfigInPlace(config, reloadResult.config);
+        aiService.updateBackends(config.ai);
+
+        try {
+            publishHaDiscovery();
+        } catch (err) {
+            logger.warn(`Failed to republish Home Assistant discovery after reload: ${err}`);
+        }
+
+        ensureConfigReloadWatcher(reloadResult.configPath);
+        logger.info(`Configuration reloaded successfully from ${reloadResult.configPath}`);
+    } finally {
+        resumeAfterReloadPause();
+    }
+}
+
+function requestConfigReload(source: string) {
+    if (reloadInProgress) {
+        reloadPending = true;
+        logger.info(`Config reload already running; queued another request from ${source}`);
+        return;
+    }
+
+    reloadInProgress = true;
+
+    void (async () => {
+        let reloadSource = source;
+
+        try {
+            do {
+                reloadPending = false;
+                await executeConfigReload(reloadSource);
+                reloadSource = 'QUEUED_RELOAD_REQUEST';
+            } while (reloadPending);
+        } catch (err) {
+            logger.error(`Unhandled config reload error: ${err}`);
+        } finally {
+            reloadInProgress = false;
+        }
+    })();
+}
+
 export function handleControlMessage(rawMessage: string) {
     const command = parseControlMessage(rawMessage);
     if (!command) {
@@ -723,6 +870,11 @@ export function handleControlMessage(rawMessage: string) {
 
     if (command.cmd === 'cancel') {
         applyCancelCommand(command);
+        return;
+    }
+
+    if (command.cmd === 'reload') {
+        requestConfigReload('CONTROL');
     }
 }
 
@@ -1254,7 +1406,7 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
 }
 
 async function processNextInput() {
-    if (dequeuePaused) {
+    if (dequeuePaused || reloadPauseActive) {
         processing = false;
         return;
     }
@@ -1388,6 +1540,8 @@ async function gracefulShutdown(signal: string) {
 
     try {
         clearPauseCountdownTimer();
+        clearReloadDebounceTimer();
+        closeConfigReloadWatcher();
 
         // Reset status topics before disconnecting so they don't linger
         mqttService.publish(`${config.mqtt.basetopic}/PROGRESS`, 'Offline', true);
@@ -1411,6 +1565,7 @@ async function gracefulShutdown(signal: string) {
 // Handle process signals
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGHUP', () => requestConfigReload('SIGHUP'));
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {

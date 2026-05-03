@@ -22,11 +22,28 @@ describe('CONTROL command handling', () => {
 
         expect(app.parseControlMessage('cancel index 2')).toEqual({ cmd: 'cancel', param: 'index', value: 2 });
         expect(app.parseControlMessage('pause 15 immediate')).toEqual({ cmd: 'pause', value: 15, param: 'immediate' });
+        expect(app.parseControlMessage('reload')).toEqual({ cmd: 'reload' });
         expect(app.parseControlMessage('{"cmd":"cancel","param":"tag","name":["front door"]}')).toEqual({
             cmd: 'cancel',
             param: 'tag',
             name: ['front door'],
         });
+        expect(app.parseControlMessage('{"cmd":"reload"}')).toEqual({ cmd: 'reload' });
+    });
+
+    test('reload control command triggers runtime config reload flow', async () => {
+        const updateBackends = jest.fn();
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+            updateBackends,
+        };
+
+        const { app } = await importAppWithMocks({ ai: aiOverrides });
+
+        app.handleControlMessage('reload');
+        await sleep(100);
+
+        expect(updateBackends).toHaveBeenCalled();
     });
 
     test('pause countdown publishes PAUSE updates and auto-resumes', async () => {
