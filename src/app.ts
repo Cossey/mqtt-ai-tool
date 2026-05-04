@@ -7,6 +7,8 @@ import { logger } from './utils/logger';
 import fs from 'fs';
 import { composeTemplateChain, sanitizeOutgoingTopic as sanitizeTopic, extractStructuredFromAiResponse as extractStructuredFromAiResponseUtil, buildJsonSchema as buildJsonSchemaUtil } from './utils/promptUtils';
 
+logger.info('==================== MQTT AI Tool starting ====================');
+
 export const mqttService = new MqttService(config.mqtt);
 export const cameraService = new CameraService();
 export const aiService = new AiService(config.ai);
@@ -326,8 +328,6 @@ let watchedConfigPath: string | null = null;
 
 async function initialize() {
     try {
-        logger.info('==================== MQTT AI Tool starting ====================');
-
         mqttService.on('connected', () => {
             logger.info('MQTT connection established, initializing channels...');
             mqttService.initializeChannels();

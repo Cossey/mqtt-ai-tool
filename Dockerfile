@@ -26,7 +26,7 @@ WORKDIR /usr/src/app
 
 # Copy package files and install only production deps
 COPY package*.json ./
-RUN npm ci --omit=dev --no-audit --progress=false
+RUN npm ci --omit=dev --ignore-scripts --no-audit --fund=false --progress=false
 
 # Copy built artifacts from builder stage
 COPY --from=builder /usr/src/app/dist ./dist
