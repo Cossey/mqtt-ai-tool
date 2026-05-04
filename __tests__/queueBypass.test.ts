@@ -149,6 +149,7 @@ describe('Immediate loader processing', () => {
         const preProcessed = {
             files: ['/tmp/preProcessed1.jpg'],
             promptAdditions: [],
+            outputArtifacts: [],
             processedIndices: new Set([0]),
         };
 
@@ -193,6 +194,7 @@ describe('Immediate loader processing', () => {
         const preProcessed = {
             files: [],
             promptAdditions: ['\n\nMQTT topic mqttai/topic1 contents:\nhello world'],
+            outputArtifacts: [],
             processedIndices: new Set([0]),
         };
 
@@ -201,6 +203,48 @@ describe('Immediate loader processing', () => {
         // The prompt should include the pre-processed addition
         expect(capturedPrompt.value).toContain('Base prompt');
         expect(capturedPrompt.value).toContain('hello world');
+    });
+
+    test('pre-processed output artifacts publish LOADER topics during final payload processing', async () => {
+        const mqttOverrides = {
+            publishBinary: jest.fn(),
+            publish: jest.fn(),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+
+        const { app, config } = await importAppWithMocks({ ai: aiOverrides, mqtt: mqttOverrides });
+
+        const payload = {
+            tag: 'immediate-output-artifacts',
+            prompt: {
+                text: 'Base prompt',
+                loader: [
+                    { type: 'mqtt', source: 'topic1', immediate: true, options: { attach: 'inline', output: true } },
+                ],
+            },
+        };
+
+        const preProcessed = {
+            files: [],
+            promptAdditions: ['\n\nMQTT topic mqttai/topic1 contents:\nhello world'],
+            outputArtifacts: [
+                { loaderType: 'mqtt', source: 'topic1', payload: Buffer.from('hello world', 'utf8') },
+            ],
+            processedIndices: new Set([0]),
+        };
+
+        await app.processPayload(payload, preProcessed as any);
+
+        expect(mqttOverrides.publishBinary).toHaveBeenCalledWith(
+            `${config.mqtt.basetopic}/OUTPUT/LOADER/mqtt/topic1`,
+            expect.any(Buffer),
+            false,
+            1
+        );
     });
 
     test('processPayload without preProcessed works normally', async () => {
@@ -259,6 +303,7 @@ describe('Immediate loader processing', () => {
         const preProcessed = {
             files: ['/tmp/pre1.jpg', '/tmp/pre2.jpg'],
             promptAdditions: [],
+            outputArtifacts: [],
             processedIndices: new Set([0, 1]),
         };
 

@@ -2,6 +2,7 @@ mqtt:
   server: your-mqtt-server
   port: 1883
   basetopic: mqttai
+  loader_publish: 0  # 0: fire-and-forget LOADER publish, >0: wait up to this many ms for publish confirmation
   username: your-username
   password: your-password
   password_file: /run/secrets/mqtt_password  # optional, will be used if `password` is not set
@@ -136,6 +137,7 @@ tasks:
           options:
             captures: 5
             interval: 2000
+            output: true
 
   # Task with multiple template chaining (templates are processed left-to-right)
   # The second template is inserted into the first template's {{template}} placeholder
@@ -168,6 +170,13 @@ tasks:
           options:
             query: "SELECT * FROM events WHERE date = CURDATE()"
             attach: csv
+            output: true
+        - type: mqtt
+          source: sensors/daily/context
+          options:
+            attach: inline
+            timeout: 3000
+            output: true
         - type: url
           source: "https://api.example.com/weather"
 

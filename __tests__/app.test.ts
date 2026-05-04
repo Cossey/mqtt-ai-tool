@@ -21,6 +21,8 @@ jest.mock('../src/services/mqttService', () => {
             constructor() {}
             on() {}
             publish(_t: string, _m: string, _r?: boolean) {}
+            publishBinary(_t: string, _d: Buffer, _r?: boolean, _q?: 0 | 1 | 2) {}
+            async publishBinaryWithTimeout(_t: string, _d: Buffer, _timeoutMs: number, _r?: boolean, _q?: 0 | 1 | 2) {}
             publishProgress(_c: any, _s: any) {}
             publishStats(_c: any, _s: any) {}
             initializeChannels(_c: any) {}
@@ -79,6 +81,7 @@ describe('processPayload integration tests (mocked services)', () => {
         const outObj = JSON.parse(outCall[1]);
         expect(outObj.json).toEqual({ Detected: 'Yes' });
         expect(outObj.model).toBeDefined();
+        expect(outObj.loader_state).toBe('none');
     });
 
     test('unstructured AI response results in null json', async () => {
@@ -91,6 +94,7 @@ describe('processPayload integration tests (mocked services)', () => {
         const outObj = JSON.parse(outCall[1]);
         expect(outObj.json).toBeNull();
         expect(outObj.text).toMatch(/Just some text/);
+        expect(outObj.loader_state).toBe('none');
     });
 
     test('OUTPUT tag is empty string when not provided in INPUT', async () => {

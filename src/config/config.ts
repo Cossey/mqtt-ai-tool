@@ -237,6 +237,21 @@ const loadConfigFromPath = (configPath: string): Config => {
         config.mqtt.port = port;
     }
 
+    // loader_publish controls LOADER publish mode: 0 fire-and-forget, >0 await confirmation timeout (ms)
+    if (config.mqtt.loader_publish === undefined || config.mqtt.loader_publish === null) {
+        config.mqtt.loader_publish = 0;
+    } else if (typeof config.mqtt.loader_publish === 'string') {
+        const parsed = parseInt(config.mqtt.loader_publish as any, 10);
+        if (isNaN(parsed)) {
+            throw new Error('MQTT loader_publish must be a valid number');
+        }
+        config.mqtt.loader_publish = parsed;
+    }
+
+    if (!Number.isFinite(config.mqtt.loader_publish) || config.mqtt.loader_publish < 0 || !Number.isInteger(config.mqtt.loader_publish)) {
+        throw new Error('MQTT loader_publish must be a non-negative integer');
+    }
+
     return config;
 };
 

@@ -2,6 +2,7 @@ export interface MqttConfig {
     server: string;
     port: number;
     basetopic: string;
+    loader_publish?: number; // 0: fire-and-forget, >0: wait for publish confirmation up to timeout ms
     username?: string; // was 'user'
     password?: string;
     password_file?: string;
@@ -69,6 +70,17 @@ export interface DatabaseConfig {
     database: string;
 }
 
+export interface LoaderOptions extends Record<string, any> {
+    output?: boolean;
+}
+
+export interface LoaderConfig {
+    type: string;
+    source: string;
+    immediate?: boolean; // process this loader immediately even when task is queued (default: false)
+    options?: LoaderOptions;
+}
+
 export interface TaskConfig {
     ai?: string; // AI backend to use
     topic?: string; // Optional topic routing
@@ -80,12 +92,7 @@ export interface TaskConfig {
         output?: Record<string, JsonSchemaProperty>; // Structured output schema
         model?: string; // Optional model override
         files?: string[]; // Files to attach
-        loader?: Array<{
-            type: string;
-            source: string;
-            immediate?: boolean; // process this loader immediately even when task is queued (default: false)
-            options?: Record<string, any>;
-        }>;
+        loader?: LoaderConfig[];
     };
 }
 

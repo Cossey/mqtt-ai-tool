@@ -27,6 +27,8 @@ export async function importAppWithMocks(overrides: ServiceOverrides = {}) {
     // Always mock MqttService with safe defaults and then merge in user overrides
     const mqttDefault = {
         publish: () => {},
+        publishBinary: () => {},
+        publishBinaryWithTimeout: async () => {},
         publishProgress: () => {},
         publishStats: () => {},
         on: () => {},

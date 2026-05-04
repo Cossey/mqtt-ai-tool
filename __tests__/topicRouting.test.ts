@@ -25,6 +25,7 @@ beforeAll(async () => {
 describe('topic routing for OUTPUT subtopics', () => {
     beforeEach(() => {
         jest.spyOn(mqttService, 'publish').mockImplementation(() => {});
+        jest.spyOn(mqttService, 'publishBinary').mockImplementation(() => {});
         jest.spyOn(aiService, 'sendFilesAndPrompt').mockResolvedValue({ choices: [{ message: { content: 'ok' } }] } as any);
     });
 
@@ -63,5 +64,24 @@ describe('topic routing for OUTPUT subtopics', () => {
         // and the actual result should also be published to base OUTPUT (since fallback)
         const resultCall = publishCalls.find((c: any) => c[0] === `${config.mqtt.basetopic}/OUTPUT` && String(c[1]).includes('tag":"t2"'));
         expect(resultCall).toBeDefined();
+    });
+
+    test('loader output topics follow routed OUTPUT/<topic>/LOADER path', async () => {
+        jest.spyOn(mqttService, 'fetchTopicMessage').mockResolvedValue({ payload: Buffer.from('loader-bytes'), isBinary: false } as any);
+
+        const payload = {
+            tag: 'loaderRoute',
+            topic: 'BACKYARD/SECURITY',
+            prompt: {
+                text: 'Hello',
+                loader: [{ type: 'mqtt', source: 'topic1', options: { attach: 'inline', output: true } }],
+            },
+        } as any;
+
+        await app.processPayload(payload);
+
+        const binaryCalls = (mqttService.publishBinary as jest.Mock).mock.calls;
+        const loaderCall = binaryCalls.find((c: any[]) => c[0] === `${config.mqtt.basetopic}/OUTPUT/BACKYARD/SECURITY/LOADER/mqtt/topic1`);
+        expect(loaderCall).toBeDefined();
     });
 });

@@ -266,10 +266,10 @@ export class MqttService extends EventEmitter {
         }
     }
 
-    public publishBinary(topic: string, data: Buffer, retain: boolean = false) {
+    public publishBinary(topic: string, data: Buffer, retain: boolean = false, qosOverride?: 0 | 1 | 2) {
         if (this.client && this.client.connected) {
-            const qos = retain ? 1 : 0;
-            logger.info(`Publishing binary data to "${topic}": ${data.length} bytes${retain ? ' (retained)' : ''}`);
+            const qos = qosOverride ?? (retain ? 1 : 0);
+            logger.info(`Publishing binary data to "${topic}": ${data.length} bytes${retain ? ' (retained)' : ''} (qos=${qos})`);
             this.client.publish(topic, data, { retain, qos }, (err) => {
                 if (err) {
                     logger.error(`Failed to publish binary data to ${topic}: ${err.message}`);
@@ -280,6 +280,35 @@ export class MqttService extends EventEmitter {
         } else {
             logger.warn(`Cannot publish binary data to ${topic}: MQTT client not connected`);
         }
+    }
+
+    public publishBinaryWithTimeout(topic: string, data: Buffer, timeoutMs: number, retain: boolean = false, qosOverride?: 0 | 1 | 2): Promise<void> {
+        return new Promise((resolve, reject) => {
+            if (!this.client || !this.client.connected) {
+                reject(new Error('MQTT client not connected'));
+                return;
+            }
+
+            const qos = qosOverride ?? (retain ? 1 : 0);
+            let settled = false;
+
+            const timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                reject(new Error(`Publish timeout after ${timeoutMs}ms for topic ${topic}`));
+            }, timeoutMs);
+
+            this.client.publish(topic, data, { retain, qos }, (err) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                resolve();
+            });
+        });
     }
 
     public publishStats(cameraName: string, stats: CameraStats, subtopic?: string | null) {

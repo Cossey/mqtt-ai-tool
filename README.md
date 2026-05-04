@@ -118,7 +118,7 @@ Reload behavior:
 
 Runtime reload scope and limits:
 
-- Most config sections can be reloaded at runtime (AI backends, prompts, tasks, cameras, databases, and non-connection MQTT fields such as `homeassistant`).
+- Most config sections can be reloaded at runtime (AI backends, prompts, tasks, cameras, databases, and non-connection MQTT fields such as `homeassistant` and `loader_publish`).
 - MQTT connection settings cannot be changed at runtime and require process restart: `server`, `port`, `basetopic`, `username`, `password`, `password_file`, `client`.
 
 ## INPUT Request Format
@@ -161,7 +161,7 @@ Optional overrides can be provided (`topic`, `ai`, `queue`, `prompt.*`).
 
 ### OUTPUT Format
 
-Published to `<basetopic>/OUTPUT` (or routed subtopic when `topic` is used):
+AI response envelope is published to `<basetopic>/OUTPUT` (or routed subtopic when `topic` is used):
 
 ```json
 {
@@ -169,11 +169,41 @@ Published to `<basetopic>/OUTPUT` (or routed subtopic when `topic` is used):
   "time": 4.12,
   "model": "gpt-4-vision-preview",
   "text": "AI textual response",
-  "json": { "Structured": "Result" }
+  "json": { "Structured": "Result" },
+  "loader_state": "none"
 }
 ```
 
 `json` is `null` when structured extraction is not available.
+
+`loader_state` indicates LOADER publish result for this request:
+
+- `none`: no loader had `options.output: true`.
+- `ready`: LOADER publishes were issued (`loader_publish: 0`) or fully confirmed (`loader_publish > 0`).
+- `incomplete`: one or more LOADER publishes failed or timed out in confirmation mode (`loader_publish > 0`).
+
+### Loader Output Topics
+
+When a loader has `options.output: true`, the loaded bytes are also published as binary MQTT payloads on LOADER subtopics:
+
+`<basetopic>/OUTPUT[/<topic>]/LOADER/<loaderType>/<source>/<index?>`
+
+- Camera loader: image bytes (one topic per capture when `captures > 1`, using `.../<index>`).
+- Database loader: CSV bytes from query results.
+- MQTT loader: topic payload bytes (binary passthrough; text encoded as UTF-8 bytes).
+
+Publish sequencing for request completion is:
+
+1. LOADER binary topics are published first.
+2. AI OUTPUT JSON envelope is published second.
+
+This ordering is intended for consumers that react to OUTPUT and then fetch LOADER data on demand (for example openHAB rules).
+
+Loader publish mode is controlled by `mqtt.loader_publish` in `config.yaml`:
+
+- `0` (default): fire-and-forget LOADER publish.
+- `>0`: wait up to N milliseconds for each LOADER publish callback before emitting OUTPUT.
+- No retries are performed.
 
 ## Queue and Loader Behavior
 
@@ -220,6 +250,7 @@ Each loader entry is defined in `prompt.loader[]`:
 - `source`: source identifier (meaning depends on type).
 - `immediate` (optional): if `true`, pre-process this loader while the task is waiting in queue.
 - `options` (optional): loader-specific settings.
+  - `options.output` (optional, default `false`): when `true`, publish loader bytes to `.../OUTPUT/.../LOADER/...`.
 
 ### Execution Lifecycle
 
@@ -243,6 +274,7 @@ Purpose: capture one or more images from a configured camera source.
 - `source`: camera key under `cameras` in `config.yaml`.
 - `options.captures` (default `1`): number of captures.
 - `options.interval` (default `1000` ms): delay between captures.
+- `options.output` (default `false`): publish captured image bytes to LOADER topics.
 
 Behavior:
 
@@ -271,6 +303,7 @@ Purpose: fetch one message from a topic and attach inline or as file.
   - Otherwise it is prefixed as `<basetopic>/<source>`.
 - `options.timeout` (default `5000` ms): wait timeout for first message.
 - `options.attach` (default `inline`): `inline` or file mode.
+- `options.output` (default `false`): publish fetched MQTT payload bytes to LOADER topics.
 
 Behavior:
 
@@ -289,6 +322,7 @@ Purpose: run a MariaDB query and attach results inline or as CSV.
 - `source`: database key under `databases` in `config.yaml`.
 - `options.query` (required): SQL query text.
 - `options.attach` (default `csv`): `csv` or `inline`.
+- `options.output` (default `false`): publish CSV result bytes to LOADER topics.
 
 Behavior:
 
@@ -326,6 +360,7 @@ tasks:
           options:
             captures: 3
             interval: 1500
+            output: true
 
         - type: url
           source: https://example.com/context.pdf
@@ -335,12 +370,14 @@ tasks:
           options:
             attach: inline
             timeout: 3000
+            output: true
 
         - type: database
           source: main
           options:
             query: SELECT ts, value FROM metrics ORDER BY ts DESC LIMIT 50
             attach: csv
+            output: true
 ```
 
 ## Topic Routing
@@ -348,6 +385,7 @@ tasks:
 If an INPUT payload contains `topic`, output/telemetry are routed to subtopics:
 
 - `OUTPUT/<topic>`
+- `OUTPUT/<topic>/LOADER/...` (when loader `options.output: true`)
 - `PROGRESS/<topic>`
 - `STATS/<topic>`
 
@@ -391,6 +429,7 @@ mqtt:
   server: mqtt.example.local
   port: 1883
   basetopic: mqttai
+  loader_publish: 0
   username: mqttuser
   password_file: /run/secrets/mqtt_password
   client: mqtt-ai-tool
@@ -505,9 +544,9 @@ Docker with explicit config path:
 ```bash
 docker run -d \
   --name mqtt-ai-tool \
-  -e CONFIG_FILE=/app/config/custom-config.yaml \
+  -e CONFIG_FILE=/usr/src/app/config/custom-config.yaml \
   -e LOG_LEVEL=debug \
-  -v /path/to/config.yaml:/app/config/custom-config.yaml \
+  -v /path/to/config.yaml:/usr/src/app/config/custom-config.yaml \
   kosdk/mqtt-ai-tool:latest
 ```
 
@@ -558,6 +597,7 @@ mosquitto_sub -h mqtt-server -t "mqttai/PAUSE" -v
 
 - `LOG_LEVEL`: `error`, `warn`, `info`, `debug`, `verbose`, `silly`
 - `CONFIG_FILE`: config path override (useful in containerized deployments)
+- `MQTT_AI_CONFIG_RELOAD`: set to `true` to enable debounced config file watch reloads
 
 ### Common Issues
 

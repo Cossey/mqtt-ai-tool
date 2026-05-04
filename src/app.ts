@@ -278,7 +278,15 @@ statusService.on('statsUpdate', (cameraName: string, stats: any) => {
 interface ImmediateLoaderResult {
     files: string[];
     promptAdditions: string[];
+    outputArtifacts: LoaderBinaryOutput[];
     processedIndices: Set<number>;
+}
+
+interface LoaderBinaryOutput {
+    loaderType: string;
+    source: string;
+    payload: Buffer;
+    index?: number;
 }
 
 interface QueueEntry {
@@ -677,13 +685,24 @@ export function parseControlMessage(rawMessage: string): ControlCommand | null {
     return parseTextControlCommand(trimmed);
 }
 
+async function cleanupTempFilesSafe(filePaths: string[]) {
+    const uniquePaths = Array.from(new Set(filePaths));
+    if (uniquePaths.length === 0) return;
+
+    try {
+        await cameraService.cleanupImageFiles(uniquePaths);
+    } catch (err) {
+        logger.warn(`Failed to cleanup temporary files: ${err}`);
+    }
+}
+
 function scheduleCanceledImmediateCleanup(entry: QueueEntry) {
     if (!entry.immediateFilesPromise) return;
 
     entry.immediateFilesPromise
         .then(async (result) => {
             if (result.files.length > 0) {
-                await cameraService.cleanupImageFiles(result.files);
+                await cleanupTempFilesSafe(result.files);
             }
         })
         .catch((err) => {
@@ -888,9 +907,10 @@ async function processLoaderItem(
     loaderTotal: number,
     loaderTypeIndex: number,
     primaryCamera: string | undefined,
-): Promise<{ files: string[]; promptAdditions: string[] }> {
+): Promise<{ files: string[]; promptAdditions: string[]; outputArtifacts: LoaderBinaryOutput[] }> {
     const files: string[] = [];
     const promptAdditions: string[] = [];
+    const outputArtifacts: LoaderBinaryOutput[] = [];
 
     // Generic loader progress update
     if (primaryCamera) statusService.updateStatus(primaryCamera, `Processing loader ${loaderNum} of ${loaderTotal} (${loader.type})`);
@@ -922,6 +942,7 @@ async function processLoaderItem(
 
         const captures = loader.options?.captures || 1;
         const interval = loader.options?.interval || 1000;
+        const outputEnabled = loader.options?.output === true;
 
         const captureStartTime = Date.now();
         let totalCaptureTime = 0;
@@ -936,6 +957,19 @@ async function processLoaderItem(
             totalCaptureTime += (singleCaptureEnd - singleCaptureStart) / 1000;
 
             files.push(imagePath);
+            if (outputEnabled) {
+                try {
+                    const imageBytes = fs.readFileSync(imagePath);
+                    outputArtifacts.push({
+                        loaderType: 'camera',
+                        source,
+                        payload: imageBytes,
+                        index: captures > 1 ? i + 1 : undefined,
+                    });
+                } catch (err) {
+                    logger.warn(`Failed to read captured image for loader output (${source}): ${err}`);
+                }
+            }
 
             if (i < captures - 1 && interval > 0) {
                 if (primaryCamera) statusService.updateStatus(source, `Waiting for next capture (${i + 1} of ${captures})`);
@@ -1006,6 +1040,7 @@ async function processLoaderItem(
         if (!query) throw new Error(`Database loader for ${source} missing 'query' option`);
 
         const attach = loader.options?.attach || 'csv';
+        const outputEnabled = loader.options?.output === true;
 
         const mariadb = (await import('mariadb')).default || (await import('mariadb'));
 
@@ -1024,6 +1059,7 @@ async function processLoaderItem(
 
             const resultRows = Array.isArray(rows) ? rows : [rows];
             const rowCount = resultRows.length;
+            const csv = rowsToCsv(resultRows);
 
             if (primaryCamera) {
                 const existingLoaderStats = statusService.getStats(primaryCamera).loader || {};
@@ -1046,8 +1082,16 @@ async function processLoaderItem(
                 });
             }
 
+            if (outputEnabled) {
+                outputArtifacts.push({
+                    loaderType: 'database',
+                    source,
+                    payload: Buffer.from(csv, 'utf8'),
+                    index: loaderTypeIndex > 1 ? loaderTypeIndex : undefined,
+                });
+            }
+
             if (attach === 'csv') {
-                const csv = rowsToCsv(resultRows);
                 const os = await import('os');
                 const path = await import('path');
                 const tmpName = `mqttai_db_${source}_${Date.now()}_${Math.round(Math.random() * 10000)}.csv`;
@@ -1055,7 +1099,7 @@ async function processLoaderItem(
                 fs.writeFileSync(tmpPath, csv);
                 files.push(tmpPath);
             } else {
-                promptAdditions.push(`\n\nDatabase ${source} query results:\n${rowsToCsv(resultRows)}`);
+                promptAdditions.push(`\n\nDatabase ${source} query results:\n${csv}`);
             }
         } finally {
             try { await conn.end(); } catch (e) { logger.warn(`Error closing DB connection: ${e}`); }
@@ -1067,6 +1111,7 @@ async function processLoaderItem(
         const topic = source.startsWith(config.mqtt.basetopic) ? source : `${config.mqtt.basetopic}/${source}`;
         const timeout = loader.options?.timeout || 5000;
         const attach = loader.options?.attach || 'inline';
+        const outputEnabled = loader.options?.output === true;
 
         logger.info(`Fetching MQTT topic '${topic}' for loader`);
 
@@ -1082,6 +1127,15 @@ async function processLoaderItem(
             const buf: Buffer = mqttPayload as Buffer;
             const mime = detectMime(buf);
 
+            if (outputEnabled) {
+                outputArtifacts.push({
+                    loaderType: 'mqtt',
+                    source,
+                    payload: buf,
+                    index: loaderTypeIndex > 1 ? loaderTypeIndex : undefined,
+                });
+            }
+
             if (attach === 'inline') {
                 promptAdditions.push(`\n\nMQTT topic ${topic} returned binary data (base64): ${buf.toString('base64')}`);
             } else {
@@ -1090,10 +1144,21 @@ async function processLoaderItem(
             }
         } else {
             const text = String(mqttPayload);
+            const textBuffer = Buffer.from(text, 'utf8');
+
+            if (outputEnabled) {
+                outputArtifacts.push({
+                    loaderType: 'mqtt',
+                    source,
+                    payload: textBuffer,
+                    index: loaderTypeIndex > 1 ? loaderTypeIndex : undefined,
+                });
+            }
+
             if (attach === 'inline') {
                 promptAdditions.push(`\n\nMQTT topic ${topic} contents:\n${text}`);
             } else {
-                const tmpPath = await writeBufferToTemp(Buffer.from(text, 'utf8'), topic, 'text/plain');
+                const tmpPath = await writeBufferToTemp(textBuffer, topic, 'text/plain');
                 files.push(tmpPath);
             }
         }
@@ -1101,7 +1166,7 @@ async function processLoaderItem(
         logger.warn(`Unknown loader type: ${loader.type}`);
     }
 
-    return { files, promptAdditions };
+    return { files, promptAdditions, outputArtifacts };
 }
 
 /**
@@ -1112,6 +1177,7 @@ async function processImmediateLoaders(payload: any): Promise<ImmediateLoaderRes
     const result: ImmediateLoaderResult = {
         files: [],
         promptAdditions: [],
+        outputArtifacts: [],
         processedIndices: new Set(),
     };
 
@@ -1146,6 +1212,7 @@ async function processImmediateLoaders(payload: any): Promise<ImmediateLoaderRes
 
             result.files.push(...loaderResult.files);
             result.promptAdditions.push(...loaderResult.promptAdditions);
+            result.outputArtifacts.push(...loaderResult.outputArtifacts);
             result.processedIndices.add(lIdx);
         }
 
@@ -1200,6 +1267,10 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
     const primaryCamera = Array.isArray(payload?.prompt?.loader)
         ? payload.prompt.loader.find((l: any) => l.type === 'camera')?.source
         : undefined;
+
+    const aiFiles: string[] = [];
+    const tempFilesToCleanup = new Set<string>();
+    let successMetrics: { aiTime: number; totalTime: number } | null = null;
 
     try {
         // Determine AI backend
@@ -1287,13 +1358,13 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
         }
 
         // Collect files from payload.files and loader entries
-        const tempFiles: string[] = [];
+        const loaderOutputArtifacts: LoaderBinaryOutput[] = [];
 
         if (payload.files && Array.isArray(payload.files)) {
             for (const f of payload.files) {
                 try {
                     if (fs.existsSync(f)) {
-                        tempFiles.push(f);
+                        aiFiles.push(f);
                     } else {
                         logger.warn(`File specified in payload not found on disk: ${f}`);
                     }
@@ -1312,10 +1383,14 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
 
             // Inject pre-processed immediate loader results
             if (preProcessed) {
-                tempFiles.push(...preProcessed.files);
+                for (const filePath of preProcessed.files) {
+                    aiFiles.push(filePath);
+                    tempFilesToCleanup.add(filePath);
+                }
                 for (const addition of preProcessed.promptAdditions) {
                     promptText = `${promptText}${addition}`;
                 }
+                loaderOutputArtifacts.push(...(preProcessed.outputArtifacts || []));
             }
 
             // Loader type counters (1-based index per type)
@@ -1337,10 +1412,14 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
                 // Delegate to the shared loader processor
                 const loaderResult = await processLoaderItem(loader, loaderNum, loaderTotal, loaderTypeIndex, primaryCamera);
 
-                tempFiles.push(...loaderResult.files);
+                for (const filePath of loaderResult.files) {
+                    aiFiles.push(filePath);
+                    tempFilesToCleanup.add(filePath);
+                }
                 for (const addition of loaderResult.promptAdditions) {
                     promptText = `${promptText}${addition}`;
                 }
+                loaderOutputArtifacts.push(...loaderResult.outputArtifacts);
             }
         }
 
@@ -1352,7 +1431,7 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
 
         // Send to AI service: delegate to AiService to handle different backends
         const aiStart = Date.now();
-        const response = await aiService.sendFilesAndPrompt(aiName, tempFiles, promptText, responseFormat, usedModel);
+        const response = await aiService.sendFilesAndPrompt(aiName, aiFiles, promptText, responseFormat, usedModel);
         const aiEnd = Date.now();
 
         // Compute timing
@@ -1362,19 +1441,45 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
         // Build output object with structured JSON (if available) and model info
         const structured = extractStructuredFromAiResponseUtil(response, responseFormat);
 
+        // Determine loader publish state for OUTPUT envelope
+        let loaderState: 'ready' | 'incomplete' | 'none' = 'none';
+        const loaderPublishTimeoutMs = Math.max(0, Number(config.mqtt.loader_publish || 0));
+
+        // Determine output topic: use currentProcessingTopic if available
+        const outputTopic = buildOutputTopic(currentProcessingTopic);
+
+        // Publish LOADER binary topics first so consumers can fetch on-demand before OUTPUT trigger handling.
+        if (loaderOutputArtifacts.length > 0) {
+            if (loaderPublishTimeoutMs > 0) {
+                const publishResults = await Promise.allSettled(loaderOutputArtifacts.map(async (artifact) => {
+                    const loaderTopic = buildLoaderOutputTopic(outputTopic, artifact);
+                    await mqttService.publishBinaryWithTimeout(loaderTopic, artifact.payload, loaderPublishTimeoutMs, false, 1);
+                }));
+
+                const failedCount = publishResults.filter((r) => r.status === 'rejected').length;
+                if (failedCount > 0) {
+                    loaderState = 'incomplete';
+                    logger.warn(`Failed to publish ${failedCount} of ${loaderOutputArtifacts.length} LOADER topic(s)`);
+                } else {
+                    loaderState = 'ready';
+                }
+            } else {
+                for (const artifact of loaderOutputArtifacts) {
+                    const loaderTopic = buildLoaderOutputTopic(outputTopic, artifact);
+                    mqttService.publishBinary(loaderTopic, artifact.payload, false, 1);
+                }
+                loaderState = 'ready';
+            }
+        }
+
         const out = {
             tag: payload.tag || '',
             time: totalTime,
             model: usedModel,
             text: extractTextFromAiResponse(response),
             json: structured || null,
+            loader_state: loaderState,
         };
-
-        // Determine output topic: use currentProcessingTopic if available
-        let outputTopic = `${config.mqtt.basetopic}/OUTPUT`;
-        if (currentProcessingTopic) {
-            outputTopic = `${config.mqtt.basetopic}/OUTPUT/${currentProcessingTopic}`;
-        }
 
         mqttService.publish(outputTopic, JSON.stringify(out), false);
 
@@ -1383,12 +1488,7 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
             statusService.updateStatus(primaryCamera, 'Publishing response');
         }
 
-        // Clean up temp files (including images captured)
-        if (primaryCamera) statusService.updateStatus(primaryCamera, 'Cleaning up');
-        await cameraService.cleanupImageFiles(tempFiles);
-
-        // After cleanup, record success which sets the status to 'Complete'
-        if (primaryCamera) statusService.recordSuccess(primaryCamera, aiTime, totalTime);
+        successMetrics = { aiTime, totalTime };
 
         const endTime = Date.now();
         logger.info(`INPUT processing completed for tag="${payload?.tag}" in ${(endTime - startTime) / 1000}s`);
@@ -1400,6 +1500,15 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
         if (primaryCamera) statusService.recordError(primaryCamera, error as any);
         throw error;
     } finally {
+        if (tempFilesToCleanup.size > 0) {
+            if (primaryCamera) statusService.updateStatus(primaryCamera, 'Cleaning up');
+            await cleanupTempFilesSafe(Array.from(tempFilesToCleanup));
+        }
+
+        if (primaryCamera && successMetrics) {
+            statusService.recordSuccess(primaryCamera, successMetrics.aiTime, successMetrics.totalTime);
+        }
+
         // Clear the current processing topic after processing is complete
         currentProcessingTopic = null;
     }
@@ -1468,6 +1577,46 @@ function extractTextFromAiResponse(resp: any): string {
     } catch (e) {
         return '';
     }
+}
+
+function buildOutputTopic(currentTopic: string | null): string {
+    if (currentTopic && currentTopic.length > 0) {
+        return `${config.mqtt.basetopic}/OUTPUT/${currentTopic}`;
+    }
+
+    return `${config.mqtt.basetopic}/OUTPUT`;
+}
+
+function sanitizeLoaderSegment(value: string): string {
+    const trimmed = value.trim();
+    if (!trimmed) return 'unknown';
+
+    const safe = trimmed
+        .replace(/[\u0000-\u001F\u007F]/g, '')
+        .replace(/\s+/g, '_')
+        .replace(/[^a-zA-Z0-9_\-\.]/g, '_')
+        .replace(/^_+|_+$/g, '');
+
+    return safe.length > 0 ? safe : 'unknown';
+}
+
+function sanitizeLoaderSourcePath(source: string): string {
+    const sanitized = sanitizeTopic(source);
+    if (sanitized) return sanitized;
+
+    return sanitizeLoaderSegment(source);
+}
+
+function buildLoaderOutputTopic(outputTopic: string, artifact: LoaderBinaryOutput): string {
+    const loaderTypeSegment = sanitizeLoaderSegment(artifact.loaderType);
+    const sourcePath = sanitizeLoaderSourcePath(artifact.source);
+    let topic = `${outputTopic}/LOADER/${loaderTypeSegment}/${sourcePath}`;
+
+    if (artifact.index !== undefined && artifact.index > 0) {
+        topic = `${topic}/${artifact.index}`;
+    }
+
+    return topic;
 }
 
 function rowsToCsv(rows: any[]): string {

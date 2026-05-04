@@ -175,3 +175,209 @@ describe('Loader tests: MQTT and Database', () => {
         expect(statusOverrides.recordError).toHaveBeenCalled();
     });
 });
+
+describe('Loader output topic publishing', () => {
+    test('MQTT loader publishes LOADER binary before OUTPUT publish with qos=1', async () => {
+        const eventLog: string[] = [];
+        const mqttOverrides = {
+            fetchTopicMessage: async (_t: string) => ({ payload: Buffer.from([0x01, 0x02, 0x03]), isBinary: true }),
+            publishBinary: jest.fn().mockImplementation((_topic: string, _payload: Buffer, _retain?: boolean, _qos?: 0 | 1 | 2) => {
+                eventLog.push('binary');
+            }),
+            publish: jest.fn().mockImplementation((_topic: string) => {
+                eventLog.push('output');
+            }),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+
+        const { app, config } = await importAppWithMocks({ mqtt: mqttOverrides, ai: aiOverrides });
+
+        await app.processPayload({
+            tag: 'outOrder',
+            prompt: {
+                text: 'Check',
+                loader: [{ type: 'mqtt', source: 'topic1', options: { attach: 'inline', output: true } }],
+            },
+        } as any);
+
+        expect(mqttOverrides.publishBinary).toHaveBeenCalledWith(
+            `${config.mqtt.basetopic}/OUTPUT/LOADER/mqtt/topic1`,
+            expect.any(Buffer),
+            false,
+            1
+        );
+
+        const binaryIndex = eventLog.indexOf('binary');
+        const outputIndex = eventLog.indexOf('output');
+        expect(binaryIndex).toBeGreaterThanOrEqual(0);
+        expect(outputIndex).toBeGreaterThanOrEqual(0);
+        expect(binaryIndex).toBeLessThan(outputIndex);
+
+        const outputCall = mqttOverrides.publish.mock.calls.find((c: any[]) => String(c[0]).includes('/OUTPUT'));
+        expect(outputCall).toBeDefined();
+        const outputPayload = JSON.parse(outputCall[1]);
+        expect(outputPayload.loader_state).toBe('ready');
+    });
+
+    test('camera loader publishes one LOADER topic per capture index', async () => {
+        const createdImages: string[] = [];
+        const cameraName = 'gatecam';
+
+        const camOverrides = {
+            captureImage: jest.fn().mockImplementation(async () => {
+                const tmpPath = path.join(os.tmpdir(), `mqttai_test_cam_${Date.now()}_${Math.random()}.jpg`);
+                fs.writeFileSync(tmpPath, Buffer.from([0xff, 0xd8, 0xff, 0xdb]));
+                createdImages.push(tmpPath);
+                return tmpPath;
+            }),
+            cleanupImageFiles: jest.fn().mockResolvedValue(undefined),
+        };
+
+        const mqttOverrides = {
+            publishBinary: jest.fn(),
+            publish: jest.fn(),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+
+        const { app, config } = await importAppWithMocks({ camera: camOverrides, mqtt: mqttOverrides, ai: aiOverrides });
+        config.cameras[cameraName] = config.cameras[cameraName] || config.cameras[Object.keys(config.cameras)[0]];
+
+        await app.processPayload({
+            tag: 'camOut',
+            prompt: {
+                text: 'Check',
+                loader: [{ type: 'camera', source: cameraName, options: { captures: 2, interval: 0, output: true } }],
+            },
+        } as any);
+
+        expect(mqttOverrides.publishBinary).toHaveBeenCalledWith(
+            `${config.mqtt.basetopic}/OUTPUT/LOADER/camera/${cameraName}/1`,
+            expect.any(Buffer),
+            false,
+            1
+        );
+        expect(mqttOverrides.publishBinary).toHaveBeenCalledWith(
+            `${config.mqtt.basetopic}/OUTPUT/LOADER/camera/${cameraName}/2`,
+            expect.any(Buffer),
+            false,
+            1
+        );
+
+        for (const filePath of createdImages) {
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        }
+    });
+
+    test('database loader publishes CSV bytes to LOADER topic when output is enabled', async () => {
+        const rows = [{ A: '1', B: 'x' }];
+        const mariadbMock = {
+            createConnection: async () => ({
+                query: async (_q: string) => rows,
+                end: async () => {},
+            }),
+        } as any;
+
+        const mqttOverrides = {
+            publishBinary: jest.fn(),
+            publish: jest.fn(),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+
+        const camOverrides = { cleanupImageFiles: jest.fn().mockResolvedValue(undefined) };
+        const { app, config } = await importAppWithMocks({ mariadb: mariadbMock, mqtt: mqttOverrides, ai: aiOverrides, camera: camOverrides });
+        if (config?.databases?.main) config.databases.main.password = 'testpass';
+
+        await app.processPayload({
+            tag: 'dbOut',
+            prompt: {
+                text: 'DB output',
+                loader: [{ type: 'database', source: 'main', options: { query: 'select * from t', attach: 'inline', output: true } }],
+            },
+        } as any);
+
+        expect(mqttOverrides.publishBinary).toHaveBeenCalledWith(
+            `${config.mqtt.basetopic}/OUTPUT/LOADER/database/main`,
+            expect.any(Buffer),
+            false,
+            1
+        );
+
+        const payloadBuffer = mqttOverrides.publishBinary.mock.calls[0][1] as Buffer;
+        expect(payloadBuffer.toString('utf8')).toContain('A,B');
+    });
+
+    test('loaders without options.output do not publish LOADER binary topics', async () => {
+        const mqttOverrides = {
+            fetchTopicMessage: async (_t: string) => ({ payload: 'hello', isBinary: false }),
+            publishBinary: jest.fn(),
+            publish: jest.fn(),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+
+        const { app } = await importAppWithMocks({ mqtt: mqttOverrides, ai: aiOverrides });
+
+        await app.processPayload({
+            tag: 'noOutputFlag',
+            prompt: {
+                text: 'No output',
+                loader: [{ type: 'mqtt', source: 'topic1', options: { attach: 'inline' } }],
+            },
+        } as any);
+
+        expect(mqttOverrides.publishBinary).not.toHaveBeenCalled();
+    });
+
+    test('loader_state is incomplete when mqtt.loader_publish timeout mode is enabled and a LOADER publish fails', async () => {
+        const mqttOverrides = {
+            fetchTopicMessage: async (_t: string) => ({ payload: Buffer.from([0x01, 0x02, 0x03]), isBinary: true }),
+            publishBinaryWithTimeout: jest.fn().mockRejectedValue(new Error('publish timeout')),
+            publishBinary: jest.fn(),
+            publish: jest.fn(),
+            on: jest.fn(),
+            initializeChannels: jest.fn(),
+        };
+
+        const aiOverrides = {
+            sendFilesAndPrompt: jest.fn().mockResolvedValue({ choices: [{ message: { content: 'ok' } }] }),
+        };
+
+        const { app, config } = await importAppWithMocks({ mqtt: mqttOverrides, ai: aiOverrides });
+        config.mqtt.loader_publish = 50;
+
+        await app.processPayload({
+            tag: 'timeoutMode',
+            prompt: {
+                text: 'Check',
+                loader: [{ type: 'mqtt', source: 'topic1', options: { attach: 'inline', output: true } }],
+            },
+        } as any);
+
+        expect(mqttOverrides.publishBinaryWithTimeout).toHaveBeenCalled();
+        expect(mqttOverrides.publishBinary).not.toHaveBeenCalled();
+
+        const outputCall = mqttOverrides.publish.mock.calls.find((c: any[]) => String(c[0]).includes('/OUTPUT'));
+        expect(outputCall).toBeDefined();
+        const outputPayload = JSON.parse(outputCall[1]);
+        expect(outputPayload.loader_state).toBe('incomplete');
+    });
+});
