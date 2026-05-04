@@ -27,7 +27,7 @@ export class CameraService {
         const timestamp = Date.now();
         const outputFilePath = `./temp_${timestamp}.jpg`;
 
-        logger.info(`Starting image capture from RTSP URL: ${this.sanitizeRtspUrl(rtspUrl)}`);
+        logger.debug(`Starting image capture from RTSP URL: ${this.sanitizeRtspUrl(rtspUrl)}`);
         logger.debug(`Output file path: ${outputFilePath}`);
 
         try {
@@ -39,7 +39,7 @@ export class CameraService {
 
             // Verify the file was created and get its size
             const stats = fs.statSync(outputFilePath);
-            logger.info(`Image captured successfully: ${outputFilePath} (${stats.size} bytes)`);
+            logger.debug(`Image captured successfully: ${outputFilePath} (${stats.size} bytes)`);
 
             return outputFilePath;
         } catch (error) {
@@ -78,12 +78,12 @@ export class CameraService {
 
         try {
             for (let i = 0; i < captures; i++) {
-                logger.info(`Capturing image ${i + 1}/${captures}...`);
+                logger.debug(`Capturing image ${i + 1}/${captures}...`);
 
                 const imagePath = await this.captureImage(rtspUrl);
                 imagePaths.push(imagePath);
 
-                logger.info(`Image ${i + 1}/${captures} captured: ${imagePath}`);
+                logger.debug(`Image ${i + 1}/${captures} captured: ${imagePath}`);
 
                 // Wait for interval before next capture (except for the last image)
                 if (i < captures - 1 && interval > 0) {

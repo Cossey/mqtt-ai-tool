@@ -303,9 +303,9 @@ const loadConfig = (): Config => {
     const configPath = resolveConfigPath();
 
     if (isDockerConfigOverrideActive()) {
-        logger.info(`Running in Docker: Using config file from environment variable: ${configPath}`);
+        logger.debug(`Running in Docker: Using config file from environment variable: ${configPath}`);
     } else {
-        logger.info(`Using default config file: ${configPath}`);
+        logger.debug(`Using default config file: ${configPath}`);
     }
 
     try {

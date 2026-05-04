@@ -326,7 +326,7 @@ let watchedConfigPath: string | null = null;
 
 async function initialize() {
     try {
-        logger.info('Starting MQTT AI Tool application...');
+        logger.info('==================== MQTT AI Tool starting ====================');
 
         mqttService.on('connected', () => {
             logger.info('MQTT connection established, initializing channels...');
@@ -341,7 +341,7 @@ async function initialize() {
         });
 
         mqttService.on('input', (payload: any) => {
-            logger.info('New INPUT received, enqueueing');
+            logger.debug('New INPUT received, enqueueing');
             enqueueInput(payload);
         });
 
@@ -404,6 +404,9 @@ export function enqueueInput(payload: any) {
         return;
     }
 
+    const tagLabel = typeof payload.tag === 'string' && payload.tag.length > 0 ? payload.tag : 'none';
+    const taskLabel = typeof payload.task === 'string' && payload.task.length > 0 ? payload.task : 'none';
+
     // Determine queue setting from task config and payload override
     let shouldQueue = true;
     let taskTemplate: any = null;
@@ -421,7 +424,7 @@ export function enqueueInput(payload: any) {
 
     if (!shouldQueue) {
         // Non-queued: process immediately, bypassing the queue
-        logger.info(`Processing non-queued INPUT (tag="${payload.tag}") immediately`);
+        logger.info(`Processing non-queued INPUT immediately (tag="${tagLabel}", task="${taskLabel}")`);
         runningCount++;
         publishRunningCount();
         processPayload(payload)
@@ -437,7 +440,7 @@ export function enqueueInput(payload: any) {
     const entry: QueueEntry = { payload };
 
     if (hasImmediateLoaders && !immediateStartPaused && !reloadPauseActive) {
-        logger.info(`Starting immediate loader processing for queued INPUT (tag="${payload.tag}")`);
+        logger.debug(`Starting immediate loader processing for queued INPUT (tag="${payload.tag}")`);
         immediateCount++;
         publishImmediateCount();
         entry.immediateFilesPromise = processImmediateLoaders(payload).finally(() => {
@@ -449,6 +452,7 @@ export function enqueueInput(payload: any) {
     }
 
     inputQueue.push(entry);
+    logger.info(`Queued INPUT at position ${inputQueue.length} (tag="${tagLabel}", task="${taskLabel}")`);
     publishQueueCount();
     if (!processing) {
         processNextInput().catch(err => logger.error(`Failed to process next input: ${err}`));
@@ -733,7 +737,12 @@ function applyCancelCommand(command: ControlCommand) {
         }
     }
 
-    if (removedEntries.length === 0) return;
+    if (removedEntries.length === 0) {
+        logger.info(`Cancel command matched no queued inputs (selector=${command.param || 'unknown'})`);
+        return;
+    }
+
+    logger.info(`Cancel command removed ${removedEntries.length} queued input(s) (selector=${command.param || 'unknown'})`);
 
     for (const entry of removedEntries) {
         scheduleCanceledImmediateCleanup(entry);
@@ -814,8 +823,24 @@ function resumeAfterReloadPause() {
     }
 }
 
+function friendlyConfigReloadSource(source: string): string {
+    switch (source) {
+    case 'CONTROL':
+        return 'reload command';
+    case 'CONFIG_FILE_CHANGE':
+        return 'file change';
+    case 'SIGHUP':
+        return 'SIGHUP';
+    case 'QUEUED_RELOAD_REQUEST':
+        return 'queued reload request';
+    default:
+        return source;
+    }
+}
+
 async function executeConfigReload(source: string) {
-    logger.info(`Config reload requested via ${source}`);
+    const sourceLabel = friendlyConfigReloadSource(source);
+    logger.info(`Config reload requested via ${sourceLabel}`);
     reloadPauseActive = true;
 
     try {
@@ -823,7 +848,7 @@ async function executeConfigReload(source: string) {
 
         const reloadResult = loadConfigForRuntimeReload(config);
         if (!reloadResult.success || !reloadResult.config) {
-            logger.warn(`Config reload failed (${source}): ${reloadResult.error || 'Unknown error'}`);
+            logger.warn(`Config reload failed (${sourceLabel}): ${reloadResult.error || 'Unknown error'}`);
             return;
         }
 
@@ -837,7 +862,7 @@ async function executeConfigReload(source: string) {
         }
 
         ensureConfigReloadWatcher(reloadResult.configPath);
-        logger.info(`Configuration reloaded successfully from ${reloadResult.configPath}`);
+        logger.info(`Configuration reloaded successfully via ${sourceLabel} from ${reloadResult.configPath}`);
     } finally {
         resumeAfterReloadPause();
     }
@@ -846,7 +871,7 @@ async function executeConfigReload(source: string) {
 function requestConfigReload(source: string) {
     if (reloadInProgress) {
         reloadPending = true;
-        logger.info(`Config reload already running; queued another request from ${source}`);
+        logger.debug(`Config reload already running; queued another request from ${friendlyConfigReloadSource(source)}`);
         return;
     }
 
@@ -1113,7 +1138,7 @@ async function processLoaderItem(
         const attach = loader.options?.attach || 'inline';
         const outputEnabled = loader.options?.output === true;
 
-        logger.info(`Fetching MQTT topic '${topic}' for loader`);
+        logger.debug(`Fetching MQTT topic '${topic}' for loader`);
 
         if (primaryCamera) statusService.updateStatus(primaryCamera, `Fetching MQTT topic: ${topic}`);
         else statusService.updateStatus(undefined, `Fetching MQTT topic: ${topic}`);
@@ -1204,7 +1229,7 @@ async function processImmediateLoaders(payload: any): Promise<ImmediateLoaderRes
                 if (loaders[i].type === loader.type) typeIndex++;
             }
 
-            logger.info(`Processing immediate loader ${lIdx + 1} of ${loaders.length} (${loader.type})`);
+            logger.debug(`Processing immediate loader ${lIdx + 1} of ${loaders.length} (${loader.type})`);
 
             const loaderResult = await processLoaderItem(
                 loader, lIdx + 1, loaders.length, typeIndex, primaryCamera
@@ -1240,9 +1265,9 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
             return { skipped: true };
         }
 
-        logger.info(`Resolving task template: ${taskName}`);
+        logger.debug(`Resolving task template: ${taskName}`);
         payload = resolved;
-        logger.debug(`Task ${taskName} resolved with overrides: ${JSON.stringify(payload)}`);
+        logger.debug(`Task ${taskName} resolved with payload overrides`);
     }
 
     // Sanitize and set the current processing topic for PROGRESS/STATS routing
@@ -1447,10 +1472,16 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
 
         // Determine output topic: use currentProcessingTopic if available
         const outputTopic = buildOutputTopic(currentProcessingTopic);
+        if (currentProcessingTopic) {
+            logger.debug(`Routing OUTPUT/PROGRESS/STATS via subtopic "${currentProcessingTopic}"`);
+        } else {
+            logger.debug('Routing OUTPUT/PROGRESS/STATS via base topics');
+        }
 
         // Publish LOADER binary topics first so consumers can fetch on-demand before OUTPUT trigger handling.
         if (loaderOutputArtifacts.length > 0) {
             if (loaderPublishTimeoutMs > 0) {
+                logger.debug(`Publishing ${loaderOutputArtifacts.length} LOADER artifact(s) with timeout confirmation (${loaderPublishTimeoutMs}ms)`);
                 const publishResults = await Promise.allSettled(loaderOutputArtifacts.map(async (artifact) => {
                     const loaderTopic = buildLoaderOutputTopic(outputTopic, artifact);
                     await mqttService.publishBinaryWithTimeout(loaderTopic, artifact.payload, loaderPublishTimeoutMs, false, 1);
@@ -1459,17 +1490,22 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
                 const failedCount = publishResults.filter((r) => r.status === 'rejected').length;
                 if (failedCount > 0) {
                     loaderState = 'incomplete';
-                    logger.warn(`Failed to publish ${failedCount} of ${loaderOutputArtifacts.length} LOADER topic(s)`);
+                    logger.warn(`LOADER publish incomplete: failed ${failedCount} of ${loaderOutputArtifacts.length} artifact(s); loader_state="incomplete"`);
                 } else {
                     loaderState = 'ready';
+                    logger.debug(`LOADER publish confirmed for ${loaderOutputArtifacts.length} artifact(s); loader_state="ready"`);
                 }
             } else {
+                logger.debug(`Publishing ${loaderOutputArtifacts.length} LOADER artifact(s) in fire-and-forget mode`);
                 for (const artifact of loaderOutputArtifacts) {
                     const loaderTopic = buildLoaderOutputTopic(outputTopic, artifact);
                     mqttService.publishBinary(loaderTopic, artifact.payload, false, 1);
                 }
                 loaderState = 'ready';
+                logger.debug(`LOADER publish issued for ${loaderOutputArtifacts.length} artifact(s); loader_state="ready"`);
             }
+        } else {
+            logger.debug(`No LOADER artifacts for tag="${payload?.tag || ''}"; loader_state="none"`);
         }
 
         const out = {
@@ -1481,6 +1517,7 @@ export async function processPayload(payload: any, preProcessed?: ImmediateLoade
             loader_state: loaderState,
         };
 
+        logger.debug(`Publishing OUTPUT with loader_state="${loaderState}" to topic "${outputTopic}"`);
         mqttService.publish(outputTopic, JSON.stringify(out), false);
 
         // Publish completion and status updates for camera if applicable
@@ -1534,13 +1571,16 @@ async function processNextInput() {
     publishRunningCount();
 
     const payload = entry.payload;
-    logger.info(`Processing INPUT payload with tag="${payload?.tag}"`);
+    const tagLabel = typeof payload?.tag === 'string' && payload.tag.length > 0 ? payload.tag : 'none';
+    const taskLabel = typeof payload?.task === 'string' && payload.task.length > 0 ? payload.task : 'none';
+    logger.info(`Dequeued INPUT for processing (tag="${tagLabel}", task="${taskLabel}")`);
+    logger.debug(`Processing INPUT payload with tag="${payload?.tag}"`);
 
     try {
         // If immediate loaders were pre-processed, await their results
         let preProcessed: ImmediateLoaderResult | undefined;
         if (entry.immediateFilesPromise) {
-            logger.info(`Awaiting immediate loader results for tag="${payload?.tag}"`);
+            logger.debug(`Awaiting immediate loader results for tag="${payload?.tag}"`);
             preProcessed = await entry.immediateFilesPromise;
             logger.info(`Immediate loader results ready: ${preProcessed.files.length} files, ${preProcessed.processedIndices.size} loaders pre-processed`);
         }

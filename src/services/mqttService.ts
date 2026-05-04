@@ -134,7 +134,7 @@ export class MqttService extends EventEmitter {
 
         // Check for simple single-topic commands under the base topic
         if (targetTopic === 'INPUT') {
-            logger.info('Received INPUT message');
+            logger.debug('Received INPUT message');
             try {
                 const payload = JSON.parse(message);
 
@@ -158,7 +158,7 @@ export class MqttService extends EventEmitter {
         }
 
         if (targetTopic === 'CONTROL') {
-            logger.info('Received CONTROL message');
+            logger.debug('Received CONTROL message');
 
             // Retained control messages can replay stale commands after reconnect; ignore them.
             if (isRetained) {
@@ -253,7 +253,7 @@ export class MqttService extends EventEmitter {
         if (this.client && this.client.connected) {
             // Use qos:1 for retained messages so the broker reliably applies the retain flag
             const qos = retain ? 1 : 0;
-            logger.info(`Publishing to "${topic}": "${message}"${retain ? ' (retained)' : ''}`);
+            logger.debug(`Publishing to "${topic}": "${message}"${retain ? ' (retained)' : ''}`);
             this.client.publish(topic, message, { retain, qos }, (err) => {
                 if (err) {
                     logger.error(`Failed to publish to ${topic}: ${err.message}`);
@@ -269,7 +269,7 @@ export class MqttService extends EventEmitter {
     public publishBinary(topic: string, data: Buffer, retain: boolean = false, qosOverride?: 0 | 1 | 2) {
         if (this.client && this.client.connected) {
             const qos = qosOverride ?? (retain ? 1 : 0);
-            logger.info(`Publishing binary data to "${topic}": ${data.length} bytes${retain ? ' (retained)' : ''} (qos=${qos})`);
+            logger.debug(`Publishing binary data to "${topic}": ${data.length} bytes${retain ? ' (retained)' : ''} (qos=${qos})`);
             this.client.publish(topic, data, { retain, qos }, (err) => {
                 if (err) {
                     logger.error(`Failed to publish binary data to ${topic}: ${err.message}`);

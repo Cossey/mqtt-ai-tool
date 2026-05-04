@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 
 export class AiService {
     private aiBackends: Record<string, AiConfig>;
+    private readonly logPreviewMaxLength = 2000;
 
     constructor(aiBackends: Record<string, AiConfig>) {
         this.aiBackends = aiBackends;
@@ -56,6 +57,17 @@ export class AiService {
         }
     }
 
+    private jsonPreview(value: unknown): string {
+        try {
+            const raw = JSON.stringify(value);
+            if (raw === undefined) return String(value);
+            if (raw.length <= this.logPreviewMaxLength) return raw;
+            return `${raw.slice(0, this.logPreviewMaxLength)}...(truncated)`;
+        } catch {
+            return '[unserializable]';
+        }
+    }
+
     public async sendFilesAndPrompt(
         aiName: string,
         filePaths: string[],
@@ -63,7 +75,7 @@ export class AiService {
         responseFormat?: ResponseFormatSchema,
         modelOverride?: string
     ): Promise<any> {
-        logger.info(`Preparing to send ${filePaths.length} file(s) to AI backend '${aiName}' with prompt: "${prompt?.slice?.(0, 80)}"`);
+        logger.debug(`Preparing to send ${filePaths.length} file(s) to AI backend '${aiName}' with prompt: "${prompt?.slice?.(0, 80)}"`);
 
         const backend = this.getBackendConfig(aiName);
 
@@ -118,7 +130,7 @@ export class AiService {
             logger.debug(`Using structured output with schema: ${responseFormat.json_schema?.name}`);
         }
 
-        logger.info(`Sending request to AI endpoint: ${backend.endpoint}`);
+        logger.debug(`Sending request to AI endpoint: ${backend.endpoint}`);
 
         try {
             const response = await axios.post(backend.endpoint, requestBody, {
@@ -129,9 +141,9 @@ export class AiService {
                 timeout: 120000,
             });
 
-            logger.info(`AI response received successfully`);
+            logger.debug(`AI response received successfully`);
             logger.debug(`AI response status: ${response.status}`);
-            logger.debug(`AI response data: ${JSON.stringify(response.data)}`);
+            logger.debug(`AI response data: ${this.jsonPreview(response.data)}`);
 
             return response.data;
         } catch (error: unknown) {
@@ -139,7 +151,7 @@ export class AiService {
 
             if (error instanceof AxiosError) {
                 logger.error(`AI service HTTP error status: ${error.response?.status}`);
-                logger.error(`AI service HTTP error data: ${JSON.stringify(error.response?.data)}`);
+                logger.error(`AI service HTTP error data: ${this.jsonPreview(error.response?.data)}`);
             } else if (error instanceof Error) {
                 logger.error(`AI service error message: ${error.message}`);
             }
