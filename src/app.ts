@@ -83,8 +83,6 @@ export function publishHaDiscovery() {
             Object.assign(properties, built);
         }
 
-        if (Object.keys(properties).length === 0) continue;
-
         // ── Fixed envelope entities (always present on every OUTPUT message) ──────────
         const sanitizedTaskNameFixed = sanitizeEntityId(taskName).replace(/-/g, '_');
         const fixedAvailability = {
@@ -103,6 +101,7 @@ export function publishHaDiscovery() {
             { id: 'time',     name: 'time',     domain: 'sensor', valueTemplate: '{{ value_json.time }}',  extras: { state_class: 'measurement', unit_of_measurement: 's' } },
             { id: 'model',    name: 'model',    domain: 'sensor', valueTemplate: '{{ value_json.model }}' },
             { id: 'text',     name: 'text',     domain: 'sensor', valueTemplate: '{{ value_json.text }}' },
+            { id: 'loader_state', name: 'loader_state', domain: 'sensor', valueTemplate: '{{ value_json.loader_state }}', extras: { options: ['none', 'ready', 'incomplete'], device_class: 'enum' } },
         ];
 
         for (const fe of fixedEntities) {
