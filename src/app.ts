@@ -16,6 +16,7 @@ export const statusService = new StatusService();
 
 // Track the current processing topic (sanitized) for PROGRESS and STATS routing
 let currentProcessingTopic: string | null = null;
+let previousHaDiscoveryTopics = new Set<string>();
 
 // Helper: sanitize names for Home Assistant object_id / unique_id
 function sanitizeEntityId(s: string): string {
@@ -46,9 +47,10 @@ const jsonPathFromSegments = (segments: string[]): string => {
  */
 export function publishHaDiscovery() {
     const haPrefix = config.mqtt.homeassistant || 'homeassistant';
-    if (!config.tasks || Object.keys(config.tasks).length === 0) return;
+    const nextHaDiscoveryTopics = new Set<string>();
+    const tasks = config.tasks || {};
 
-    for (const [taskName, task] of Object.entries(config.tasks)) {
+    for (const [taskName, task] of Object.entries(tasks)) {
         if (!task || !task.prompt) continue;
         if (!task.ha) continue; // feature opt-in per-task
 
@@ -116,12 +118,15 @@ export function publishHaDiscovery() {
                 json_attributes_topic: stateTopic,
                 ...fe.extras,
             };
+            nextHaDiscoveryTopics.add(discoveryTopic);
             mqttService.publish(discoveryTopic, JSON.stringify(payload), true);
         }
 
         // progress entity — plain text, separate topic, no value_template or json_attributes_topic
+        const progressDiscoveryTopic = `${haPrefix}/sensor/${sanitizedTaskNameFixed}/progress/config`;
+        nextHaDiscoveryTopics.add(progressDiscoveryTopic);
         mqttService.publish(
-            `${haPrefix}/sensor/${sanitizedTaskNameFixed}/progress/config`,
+            progressDiscoveryTopic,
             JSON.stringify({
                 name: 'progress',
                 unique_id: `mqttaitool_${sanitizedTaskNameFixed}_progress`,
@@ -222,6 +227,7 @@ export function publishHaDiscovery() {
                 ...extras,
             };
 
+            nextHaDiscoveryTopics.add(discoveryTopic);
             mqttService.publish(discoveryTopic, JSON.stringify(payload), true);
 
             // If wrapper, expose common nested fields as separate entities as well
@@ -264,6 +270,21 @@ export function publishHaDiscovery() {
             traverseSchema([propName], propSchema as any);
         }
     }
+
+    // Unpublish stale discovery topics so removed tasks/fields are cleaned up in Home Assistant.
+    let removedCount = 0;
+    for (const topic of previousHaDiscoveryTopics) {
+        if (!nextHaDiscoveryTopics.has(topic)) {
+            mqttService.publish(topic, '', true);
+            removedCount++;
+        }
+    }
+
+    if (removedCount > 0) {
+        logger.info(`Removed ${removedCount} stale Home Assistant discovery topic(s)`);
+    }
+
+    previousHaDiscoveryTopics = nextHaDiscoveryTopics;
 }
 
 
